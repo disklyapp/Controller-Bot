@@ -137,6 +137,113 @@ function setupCustomBot(bot) {
     }
   });
 
+  // Handle Delay Selection Menu
+  bot.action('choose_delay', async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = await db.getDraft(ctx.from.id);
+    if (!draft) {
+      return ctx.reply("❌ No active draft found.");
+    }
+
+    const keyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.callback('⏱️ 5 Mins', 'schedule:5'),
+        Markup.button.callback('⏱️ 15 Mins', 'schedule:15'),
+        Markup.button.callback('⏱️ 30 Mins', 'schedule:30')
+      ],
+      [
+        Markup.button.callback('⏱️ 1 Hour', 'schedule:60'),
+        Markup.button.callback('⏱️ 2 Hours', 'schedule:120'),
+        Markup.button.callback('⏱️ 6 Hours', 'schedule:360')
+      ],
+      [
+        Markup.button.callback('⏱️ 12 Hours', 'schedule:720'),
+        Markup.button.callback('⏱️ 24 Hours', 'schedule:1440')
+      ],
+      [Markup.button.callback('↩️ Back to Draft', 'back_to_draft')]
+    ]);
+
+    await ctx.editMessageText(
+      "🕒 *Choose a delay interval before sending to channel:*",
+      { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
+    );
+  });
+
+  // Handle Go Back to Draft Options
+  bot.action('back_to_draft', async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = await db.getDraft(ctx.from.id);
+    if (!draft) {
+      return ctx.reply("❌ No active draft found.");
+    }
+
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('👁️ Preview', 'preview_post')],
+      [
+        Markup.button.callback('📤 Send Now', 'send_post'),
+        Markup.button.callback('🕒 Send with Delay', 'choose_delay')
+      ],
+      [Markup.button.callback('❌ Cancel', 'cancel_post')]
+    ]);
+
+    const description = draft.media_type === 'photo'
+      ? `📸 *Photo Draft saved!*${draft.text ? ` (Caption: ${draft.text.length} chars)` : ''}`
+      : `✍️ *Text Draft saved!* (${draft.text.length} chars)`;
+
+    await ctx.editMessageText(
+      `${description}\n\n` +
+      `Click *Preview* to see how it looks, *Send Now* to post immediately, *Send with Delay* to set an interval, or *Cancel* to discard it.`,
+      { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
+    );
+  });
+
+  // Handle Schedule execution
+  bot.action(/^schedule:(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const minutes = parseInt(ctx.match[1], 10);
+    const userId = ctx.from.id;
+    const token = ctx.telegram.token;
+
+    const draft = await db.getDraft(userId);
+    if (!draft) {
+      return ctx.reply("❌ No active draft found.");
+    }
+
+    try {
+      const runAt = new Date(Date.now() + minutes * 60 * 1000);
+
+      // Save to scheduled posts table
+      await db.schedulePost(
+        userId,
+        token,
+        draft.channel_id,
+        draft.text,
+        draft.media_type,
+        draft.file_id,
+        runAt
+      );
+
+      // Clear active draft
+      await db.clearDraft(userId);
+
+      // Reset user session
+      const sessionKey = `${userId}:${token}`;
+      sessions.delete(sessionKey);
+
+      const timeString = runAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const dateString = runAt.toLocaleDateString([], { month: 'short', day: 'numeric' });
+
+      await ctx.editMessageText(
+        `🕒 *Post successfully scheduled!*\n\n` +
+        `It will be sent to the channel in *${minutes} minutes* (on ${dateString} at ${timeString}).`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (err) {
+      console.error('Scheduling error:', err);
+      await ctx.reply(`❌ Failed to schedule post: ${err.message}`);
+    }
+  });
+
   bot.action('cancel_post', async (ctx) => {
     await ctx.answerCbQuery();
     await db.clearDraft(ctx.from.id);
@@ -179,7 +286,11 @@ function setupCustomBot(bot) {
 
     const keyboard = Markup.inlineKeyboard([
       [Markup.button.callback('👁️ Preview', 'preview_post')],
-      [Markup.button.callback('📤 Send', 'send_post'), Markup.button.callback('❌ Cancel', 'cancel_post')]
+      [
+        Markup.button.callback('📤 Send Now', 'send_post'),
+        Markup.button.callback('🕒 Send with Delay', 'choose_delay')
+      ],
+      [Markup.button.callback('❌ Cancel', 'cancel_post')]
     ]);
 
     const description = mediaType === 'photo'
@@ -188,7 +299,7 @@ function setupCustomBot(bot) {
 
     await ctx.reply(
       `${description}\n\n` +
-      `Click *Preview* to see how it looks, *Send* to post it to the channel, or *Cancel* to discard it.`,
+      `Click *Preview* to see how it looks, *Send Now* to post immediately, *Send with Delay* to set an interval, or *Cancel* to discard it.`,
       { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
     );
   });

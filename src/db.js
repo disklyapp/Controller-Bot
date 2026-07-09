@@ -73,6 +73,20 @@ async function initDb() {
       ALTER TABLE drafts ALTER COLUMN text DROP NOT NULL;
     `);
 
+    // Scheduled posts table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS scheduled_posts (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        bot_token TEXT REFERENCES bots(token) ON DELETE CASCADE,
+        channel_id BIGINT NOT NULL,
+        text TEXT,
+        media_type VARCHAR(50) DEFAULT 'text',
+        file_id TEXT,
+        run_at TIMESTAMP WITH TIME ZONE NOT NULL
+      )
+    `);
+
     await client.query('COMMIT');
     console.log('✅ PostgreSQL Database schema checked & initialized successfully.');
   } catch (err) {
@@ -204,6 +218,33 @@ async function clearDraft(userId) {
   return res.rows[0] || null;
 }
 
+// --- SCHEDULED POSTS OPERATIONS ---
+
+async function schedulePost(userId, botToken, channelId, text, mediaType, fileId, runAt) {
+  const res = await pool.query(
+    `INSERT INTO scheduled_posts (user_id, bot_token, channel_id, text, media_type, file_id, run_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING *`,
+    [userId, botToken, channelId, text, mediaType, fileId, runAt]
+  );
+  return res.rows[0];
+}
+
+async function getDueScheduledPosts() {
+  const res = await pool.query(
+    'SELECT * FROM scheduled_posts WHERE run_at <= NOW() ORDER BY run_at ASC'
+  );
+  return res.rows;
+}
+
+async function deleteScheduledPost(id) {
+  const res = await pool.query(
+    'DELETE FROM scheduled_posts WHERE id = $1 RETURNING *',
+    [id]
+  );
+  return res.rows[0] || null;
+}
+
 module.exports = {
   pool,
   initDb,
@@ -221,5 +262,8 @@ module.exports = {
   removeChannel,
   saveDraft,
   getDraft,
-  clearDraft
+  clearDraft,
+  schedulePost,
+  getDueScheduledPosts,
+  deleteScheduledPost
 };

@@ -104,10 +104,88 @@ function getRunningBot(token) {
   return runningBots.get(token) || null;
 }
 
+let schedulerIntervalId = null;
+
+/**
+ * Checks for due scheduled posts, sends them, and cleans up the queue
+ */
+async function checkScheduledPosts() {
+  try {
+    const duePosts = await db.getDueScheduledPosts();
+    if (duePosts.length === 0) return;
+
+    console.log(`⏰ [Scheduler] Processing ${duePosts.length} due scheduled post(s)...`);
+
+    for (const post of duePosts) {
+      const bot = runningBots.get(post.bot_token);
+      if (!bot) {
+        console.error(`❌ [Scheduler] Bot with token ${post.bot_token.substring(0, 10)}... is not active. Skipping post ID ${post.id}.`);
+        await db.deleteScheduledPost(post.id);
+        continue;
+      }
+
+      try {
+        console.log(`📤 [Scheduler] Sending scheduled post ID ${post.id} to channel ${post.channel_id}...`);
+        
+        if (post.media_type === 'photo') {
+          await bot.telegram.sendPhoto(post.channel_id, post.file_id, { caption: post.text || undefined });
+        } else {
+          await bot.telegram.sendMessage(post.channel_id, post.text);
+        }
+
+        // Notify user of success
+        await bot.telegram.sendMessage(
+          post.user_id,
+          `🕒 *Scheduled Post Sent!*\nYour scheduled post was successfully published to the channel.`,
+          { parse_mode: 'Markdown' }
+        ).catch(() => {});
+
+        console.log(`✅ [Scheduler] Post ID ${post.id} successfully sent.`);
+      } catch (sendErr) {
+        console.error(`❌ [Scheduler] Error sending post ID ${post.id}:`, sendErr.message);
+        
+        // Notify user of failure
+        await bot.telegram.sendMessage(
+          post.user_id,
+          `❌ *Scheduled Post Failed!*\nYour scheduled post failed to send: ${sendErr.message}`,
+          { parse_mode: 'Markdown' }
+        ).catch(() => {});
+      }
+
+      // Always remove from scheduled queue to prevent double-sending
+      await db.deleteScheduledPost(post.id);
+    }
+  } catch (err) {
+    console.error('❌ [Scheduler] Error checking due scheduled posts:', err);
+  }
+}
+
+/**
+ * Start the background scheduler check
+ */
+function startScheduler(intervalMs = 30000) { // Every 30 seconds by default
+  if (schedulerIntervalId) return;
+  console.log('⏰ Starting background scheduler worker (checking every 30s)...');
+  schedulerIntervalId = setInterval(checkScheduledPosts, intervalMs);
+}
+
+/**
+ * Stop the background scheduler check
+ */
+function stopScheduler() {
+  if (schedulerIntervalId) {
+    console.log('🛑 Stopping background scheduler worker...');
+    clearInterval(schedulerIntervalId);
+    schedulerIntervalId = null;
+  }
+}
+
 module.exports = {
   startBot,
   stopBot,
   startAll,
   stopAll,
-  getRunningBot
+  getRunningBot,
+  startScheduler,
+  stopScheduler
 };

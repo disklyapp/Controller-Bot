@@ -46,6 +46,9 @@ async function main() {
     console.error('❌ Failed to start custom user bots:', err);
   }
 
+  // 4.5. Start background scheduled posts checking worker
+  botManager.startScheduler();
+
   console.log('✨ System is fully operational.');
 
   // 5. Setup Graceful Shutdown Listeners
@@ -60,7 +63,8 @@ async function main() {
       console.error('Error stopping main bot:', err);
     }
 
-    // Stop all custom bots polling
+    // Stop scheduler and all custom bots polling
+    botManager.stopScheduler();
     try {
       await botManager.stopAll();
     } catch (err) {
