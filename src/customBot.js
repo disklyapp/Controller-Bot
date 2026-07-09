@@ -51,7 +51,7 @@ function setupCustomBot(bot) {
 
       return ctx.reply(
         `📝 Creating a new post for channel: *${channel.title}*\n\n` +
-        `Send me the text message you want to post. You can include emojis.`,
+        `Send me the *text message* or *photo* you want to post. You can include emojis and captions.`,
         { parse_mode: 'Markdown' }
       );
     } else {
@@ -87,7 +87,7 @@ function setupCustomBot(bot) {
 
     await ctx.editMessageText(
       `📝 Creating a new post for channel: *${channel.title}*\n\n` +
-      `Send me the text message you want to post. You can include emojis.`,
+      `Send me the *text message* or *photo* you want to post. You can include emojis and captions.`,
       { parse_mode: 'Markdown' }
     );
   });
@@ -101,7 +101,12 @@ function setupCustomBot(bot) {
     }
 
     await ctx.reply("👁️ *Preview of your post:*", { parse_mode: 'Markdown' });
-    await ctx.reply(draft.text);
+    
+    if (draft.media_type === 'photo') {
+      await ctx.replyWithPhoto(draft.file_id, { caption: draft.text || undefined });
+    } else {
+      await ctx.reply(draft.text);
+    }
   });
 
   bot.action('send_post', async (ctx) => {
@@ -113,7 +118,13 @@ function setupCustomBot(bot) {
 
     try {
       await ctx.reply("📤 Sending post to channel...");
-      await ctx.telegram.sendMessage(draft.channel_id, draft.text);
+      
+      if (draft.media_type === 'photo') {
+        await ctx.telegram.sendPhoto(draft.channel_id, draft.file_id, { caption: draft.text || undefined });
+      } else {
+        await ctx.telegram.sendMessage(draft.channel_id, draft.text);
+      }
+      
       await ctx.reply("🎉 *Done!* Message successfully sent to the channel.", { parse_mode: 'Markdown' });
       
       // Clean up
@@ -136,7 +147,7 @@ function setupCustomBot(bot) {
     await ctx.reply("❌ Post creation cancelled. Draft discarded.");
   });
 
-  // Handle incoming message for draft
+  // Handle incoming message for draft (Accepts text and photos)
   bot.on('message', async (ctx) => {
     const token = ctx.telegram.token;
     const sessionKey = `${ctx.from.id}:${token}`;
@@ -146,24 +157,37 @@ function setupCustomBot(bot) {
       return ctx.reply("Please use /newpost to start creating a post.");
     }
 
-    // Enforce text only
-    if (!ctx.message.text) {
-      return ctx.reply("⚠️ Sorry, this bot only supports text messages with emojis. Please send a text message.");
-    }
+    let text = null;
+    let mediaType = 'text';
+    let fileId = null;
 
-    const text = ctx.message.text;
+    if (ctx.message.photo) {
+      const photos = ctx.message.photo;
+      // Get highest resolution photo file ID
+      fileId = photos[photos.length - 1].file_id;
+      text = ctx.message.caption || null;
+      mediaType = 'photo';
+    } else if (ctx.message.text) {
+      text = ctx.message.text;
+      mediaType = 'text';
+    } else {
+      return ctx.reply("⚠️ Sorry, this bot only supports text and photo posts. Please send a text or a photo.");
+    }
     
-    // Save draft in DB
-    await db.saveDraft(ctx.from.id, token, session.channelId, text);
+    // Save draft in PostgreSQL database
+    await db.saveDraft(ctx.from.id, token, session.channelId, text, mediaType, fileId);
 
     const keyboard = Markup.inlineKeyboard([
       [Markup.button.callback('👁️ Preview', 'preview_post')],
       [Markup.button.callback('📤 Send', 'send_post'), Markup.button.callback('❌ Cancel', 'cancel_post')]
     ]);
 
+    const description = mediaType === 'photo'
+      ? `📸 *Photo Draft saved!*${text ? ` (Caption: ${text.length} chars)` : ''}`
+      : `✍️ *Text Draft saved!* (${text.length} chars)`;
+
     await ctx.reply(
-      `✍️ *Draft saved!*\n\n` +
-      `Length: ${text.length} characters.\n` +
+      `${description}\n\n` +
       `Click *Preview* to see how it looks, *Send* to post it to the channel, or *Cancel* to discard it.`,
       { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
     );

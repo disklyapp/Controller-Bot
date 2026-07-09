@@ -60,8 +60,17 @@ async function initDb() {
         user_id BIGINT PRIMARY KEY,
         bot_token TEXT NOT NULL REFERENCES bots(token) ON DELETE CASCADE,
         channel_id BIGINT NOT NULL,
-        text TEXT NOT NULL
+        text TEXT,
+        media_type VARCHAR(50) DEFAULT 'text',
+        file_id TEXT
       )
+    `);
+
+    // Run safe migrations in case the database already exists
+    await client.query(`
+      ALTER TABLE drafts ADD COLUMN IF NOT EXISTS media_type VARCHAR(50) DEFAULT 'text';
+      ALTER TABLE drafts ADD COLUMN IF NOT EXISTS file_id TEXT;
+      ALTER TABLE drafts ALTER COLUMN text DROP NOT NULL;
     `);
 
     await client.query('COMMIT');
@@ -173,14 +182,14 @@ async function removeChannel(channelId) {
 
 // --- DRAFT OPERATIONS ---
 
-async function saveDraft(userId, botToken, channelId, text) {
+async function saveDraft(userId, botToken, channelId, text, mediaType = 'text', fileId = null) {
   const res = await pool.query(
-    `INSERT INTO drafts (user_id, bot_token, channel_id, text)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO drafts (user_id, bot_token, channel_id, text, media_type, file_id)
+     VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT (user_id) DO UPDATE
-     SET bot_token = EXCLUDED.bot_token, channel_id = EXCLUDED.channel_id, text = EXCLUDED.text
+     SET bot_token = EXCLUDED.bot_token, channel_id = EXCLUDED.channel_id, text = EXCLUDED.text, media_type = EXCLUDED.media_type, file_id = EXCLUDED.file_id
      RETURNING *`,
-    [userId, botToken, channelId, text]
+    [userId, botToken, channelId, text, mediaType, fileId]
   );
   return res.rows[0];
 }
