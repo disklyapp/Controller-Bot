@@ -236,7 +236,8 @@ async function schedulePost(userId, botToken, channelId, text, mediaType, fileId
 
 async function getDueScheduledPosts() {
   const res = await pool.query(
-    'SELECT * FROM scheduled_posts WHERE run_at <= NOW() ORDER BY run_at ASC'
+    'SELECT * FROM scheduled_posts WHERE run_at <= $1 ORDER BY run_at ASC',
+    [new Date()]
   );
   return res.rows;
 }

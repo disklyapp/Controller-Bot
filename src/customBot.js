@@ -272,7 +272,15 @@ function setupCustomBot(bot) {
     const session = sessions.get(sessionKey);
 
     if (!session || session.step !== 'waiting_for_text') {
-      return ctx.reply("Please use /newpost to start creating a post.");
+      return ctx.reply(
+        `❓ *Command or Message Not Recognized*\n\n` +
+        `Here is how you can use this Poster Bot:\n\n` +
+        `📝 *Custom Poster Bot Commands:*\n` +
+        `• /newpost or /start - Start creating a new post (accepts text messages and photos, allows sending immediately, adding to queue, or scheduling).\n` +
+        `• /queue - View all queued scheduled posts for your channel(s) and delete/cancel pending ones.\n` +
+        `• /cancel - Cancel draft post creation and discard details.`,
+        { parse_mode: 'Markdown' }
+      );
     }
 
     let text = null;

@@ -427,8 +427,17 @@ function setupControllerBot(bot) {
       return ctx.reply('⚠️ Please select a queue interval from the buttons above, or click Skip / Use Default, or send /cancel.');
     }
 
-    // Default reply
-    await ctx.reply('ℹ️ Send /start to see available commands.');
+    // Default reply showing all commands
+    await ctx.reply(
+      `❓ *Command or Message Not Recognized*\n\n` +
+      `Here are the commands you can use in this Controller Bot:\n\n` +
+      `🛠️ *Main Controller Bot Commands:*\n` +
+      `• /start - Welcome message and main guide.\n` +
+      `• /addchannel - Connect a new channel to your dashboard by linking a custom bot token.\n` +
+      `• /mychannels - View connected channels, change their queue interval times, or remove them.\n` +
+      `• /cancel - Abort the current setup wizard or configuration process.`,
+      { parse_mode: 'Markdown' }
+    );
   });
 }
 
