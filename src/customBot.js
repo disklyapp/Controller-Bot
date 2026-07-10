@@ -241,8 +241,8 @@ function setupCustomBot(bot) {
       const sessionKey = `${userId}:${token}`;
       sessions.delete(sessionKey);
 
-      const timeString = runAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      const dateString = runAt.toLocaleDateString([], { month: 'short', day: 'numeric' });
+      const timeString = runAt.toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+      const dateString = runAt.toLocaleDateString('en-US', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' });
 
       await ctx.editMessageText(
         `🕒 *Post successfully scheduled!*\n\n` +
@@ -361,8 +361,8 @@ function setupCustomBot(bot) {
       const sessionKey = `${userId}:${token}`;
       sessions.delete(sessionKey);
 
-      const timeString = runAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      const dateString = runAt.toLocaleDateString([], { month: 'short', day: 'numeric' });
+      const timeString = runAt.toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+      const dateString = runAt.toLocaleDateString('en-US', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' });
 
       await ctx.editMessageText(
         `📥 *Post successfully added to Queue!*\n\n` +
@@ -440,8 +440,8 @@ async function showChannelQueue(ctx, channelId, editMessage = false) {
 
   queuedPosts.forEach((post, index) => {
     const runAt = new Date(post.run_at);
-    const timeString = runAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const dateString = runAt.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    const timeString = runAt.toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+    const dateString = runAt.toLocaleDateString('en-US', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' });
     
     let contentSnippet = '';
     if (post.text) {
