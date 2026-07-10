@@ -265,77 +265,19 @@ function setupCustomBot(bot) {
     await ctx.reply("❌ Post creation cancelled. Draft discarded.");
   });
 
-  // Handle incoming message for draft (Accepts text and photos)
-  bot.on('message', async (ctx) => {
-    const token = ctx.telegram.token;
-    const sessionKey = `${ctx.from.id}:${token}`;
-    const session = sessions.get(sessionKey);
 
-    if (!session || session.step !== 'waiting_for_text') {
-      return ctx.reply(
-        `❓ *Command or Message Not Recognized*\n\n` +
-        `Here is how you can use this Poster Bot:\n\n` +
-        `📝 *Custom Poster Bot Commands:*\n` +
-        `• /newpost or /start - Start creating a new post (accepts text messages and photos, allows sending immediately, adding to queue, or scheduling).\n` +
-        `• /queue - View all queued scheduled posts for your channel(s) and delete/cancel pending ones.\n` +
-        `• /cancel - Cancel draft post creation and discard details.`,
-        { parse_mode: 'Markdown' }
-      );
-    }
-
-    let text = null;
-    let mediaType = 'text';
-    let fileId = null;
-
-    if (ctx.message.photo) {
-      const photos = ctx.message.photo;
-      // Get highest resolution photo file ID
-      fileId = photos[photos.length - 1].file_id;
-      text = ctx.message.caption || null;
-      mediaType = 'photo';
-    } else if (ctx.message.text) {
-      text = ctx.message.text;
-      mediaType = 'text';
-    } else {
-      return ctx.reply("⚠️ Sorry, this bot only supports text and photo posts. Please send a text or a photo.");
-    }
-    
-    // Save draft in PostgreSQL database
-    await db.saveDraft(ctx.from.id, token, session.channelId, text, mediaType, fileId);
-
-    const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback('👁️ Preview', 'preview_post')],
-      [
-        Markup.button.callback('📤 Send Now', 'send_post'),
-        Markup.button.callback('📥 Add to Queue', 'add_to_queue')
-      ],
-      [
-        Markup.button.callback('🕒 Send with Delay', 'choose_delay'),
-        Markup.button.callback('❌ Cancel', 'cancel_post')
-      ]
-    ]);
-
-    const description = mediaType === 'photo'
-      ? `📸 *Photo Draft saved!*${text ? ` (Caption: ${text.length} chars)` : ''}`
-      : `✍️ *Text Draft saved!* (${text.length} chars)`;
-
-    await ctx.reply(
-      `${description}\n\n` +
-      `Click *Preview* to see how it looks, *Send Now* to post immediately, *Add to Queue* to queue it, *Send with Delay* to schedule it with a custom delay, or *Cancel* to discard it.`,
-      { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
-    );
-  });
 
   // Handle Add to Queue execution
   bot.action('add_to_queue', async (ctx) => {
-    await ctx.answerCbQuery();
     const userId = ctx.from.id;
     const token = ctx.telegram.token;
 
     const draft = await db.getDraft(userId);
     if (!draft) {
-      return ctx.reply("❌ No active draft found.");
+      return ctx.answerCbQuery("❌ No active draft found or already processed!", { show_alert: true }).catch(() => {});
     }
+
+    await ctx.answerCbQuery().catch(() => {});
 
     try {
       const channel = await db.getChannel(draft.channel_id);
@@ -423,6 +365,67 @@ function setupCustomBot(bot) {
     }
 
     return showChannelQueue(ctx, channelId, true);
+  });
+
+  // Handle incoming message for draft (Accepts text and photos) - Registered last to avoid command clashes
+  bot.on('message', async (ctx) => {
+    const token = ctx.telegram.token;
+    const sessionKey = `${ctx.from.id}:${token}`;
+    const session = sessions.get(sessionKey);
+
+    if (!session || session.step !== 'waiting_for_text') {
+      return ctx.reply(
+        `❓ *Command or Message Not Recognized*\n\n` +
+        `Here is how you can use this Poster Bot:\n\n` +
+        `📝 *Custom Poster Bot Commands:*\n` +
+        `• /newpost or /start - Start creating a new post (accepts text messages and photos, allows sending immediately, adding to queue, or scheduling).\n` +
+        `• /queue - View all queued scheduled posts for your channel(s) and delete/cancel pending ones.\n` +
+        `• /cancel - Cancel draft post creation and discard details.`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+    let text = null;
+    let mediaType = 'text';
+    let fileId = null;
+
+    if (ctx.message.photo) {
+      const photos = ctx.message.photo;
+      // Get highest resolution photo file ID
+      fileId = photos[photos.length - 1].file_id;
+      text = ctx.message.caption || null;
+      mediaType = 'photo';
+    } else if (ctx.message.text) {
+      text = ctx.message.text;
+      mediaType = 'text';
+    } else {
+      return ctx.reply("⚠️ Sorry, this bot only supports text and photo posts. Please send a text or a photo.");
+    }
+    
+    // Save draft in PostgreSQL database
+    await db.saveDraft(ctx.from.id, token, session.channelId, text, mediaType, fileId);
+
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('👁️ Preview', 'preview_post')],
+      [
+        Markup.button.callback('📤 Send Now', 'send_post'),
+        Markup.button.callback('📥 Add to Queue', 'add_to_queue')
+      ],
+      [
+        Markup.button.callback('🕒 Send with Delay', 'choose_delay'),
+        Markup.button.callback('❌ Cancel', 'cancel_post')
+      ]
+    ]);
+
+    const description = mediaType === 'photo'
+      ? `📸 *Photo Draft saved!*${text ? ` (Caption: ${text.length} chars)` : ''}`
+      : `✍️ *Text Draft saved!* (${text.length} chars)`;
+
+    await ctx.reply(
+      `${description}\n\n` +
+      `Click *Preview* to see how it looks, *Send Now* to post immediately, *Add to Queue* to queue it, *Send with Delay* to schedule it with a custom delay, or *Cancel* to discard it.`,
+      { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
+    );
   });
 }
 

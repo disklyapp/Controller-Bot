@@ -31,11 +31,17 @@ async function main() {
     const me = await controllerBot.telegram.getMe();
     console.log(`🤖 Main Controller Bot @${me.username} verified successfully.`);
 
-    // Start main bot
-    await controllerBot.launch();
-    console.log(`✅ Main Controller Bot is online and polling.`);
+    // Start main bot asynchronously to avoid blocking the startup thread
+    controllerBot.launch()
+      .then(() => {
+        console.log(`✅ Main Controller Bot is online and polling.`);
+      })
+      .catch(err => {
+        console.error('❌ Failed to launch main Controller Bot:', err.message);
+        process.exit(1);
+      });
   } catch (err) {
-    console.error('❌ Failed to launch main Controller Bot:', err.message);
+    console.error('❌ Failed to verify main Controller Bot:', err.message);
     process.exit(1);
   }
 

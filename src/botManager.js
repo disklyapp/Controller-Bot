@@ -110,8 +110,11 @@ let schedulerIntervalId = null;
  * Checks for due scheduled posts, sends them, and cleans up the queue
  */
 async function checkScheduledPosts() {
+  const checkTime = new Date();
+  console.log(`⏰ [Scheduler] Checking database for due scheduled posts at ${checkTime.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })} (IST)...`);
   try {
     const duePosts = await db.getDueScheduledPosts();
+    console.log(`⏰ [Scheduler] Query complete. Found ${duePosts.length} due scheduled post(s) to process.`);
     if (duePosts.length === 0) return;
 
     console.log(`⏰ [Scheduler] Processing ${duePosts.length} due scheduled post(s)...`);
