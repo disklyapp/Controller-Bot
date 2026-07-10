@@ -367,24 +367,52 @@ function setupCustomBot(bot) {
     return showChannelQueue(ctx, channelId, true);
   });
 
+  // Handle target channel selection for draft (for multiple channels flow)
+  bot.action(/^sel_draft_ch:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const channelId = ctx.match[1];
+    const userId = ctx.from.id;
+    const token = ctx.telegram.token;
+
+    const channel = await db.getChannel(channelId);
+    if (!channel) {
+      return ctx.reply("❌ Channel not found.");
+    }
+
+    const draft = await db.getDraft(userId);
+    if (!draft) {
+      return ctx.reply("❌ No active draft found.");
+    }
+
+    // Update draft with selected channel ID
+    await db.saveDraft(userId, token, channelId, draft.text, draft.media_type, draft.file_id);
+
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('👁️ Preview', 'preview_post')],
+      [
+        Markup.button.callback('📤 Send Now', 'send_post'),
+        Markup.button.callback('📥 Add to Queue', 'add_to_queue')
+      ],
+      [
+        Markup.button.callback('🕒 Send with Delay', 'choose_delay'),
+        Markup.button.callback('❌ Cancel', 'cancel_post')
+      ]
+    ]);
+
+    await ctx.editMessageText(
+      `✍️ *Draft created for ${channel.title}*\n\n` +
+      `Click *Preview* to see it, *Send Now* to post immediately, *Add to Queue* to queue it, or *Cancel* to discard.`,
+      { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
+    );
+  });
+
   // Handle incoming message for draft (Accepts text and photos) - Registered last to avoid command clashes
   bot.on('message', async (ctx) => {
     const token = ctx.telegram.token;
     const sessionKey = `${ctx.from.id}:${token}`;
     const session = sessions.get(sessionKey);
 
-    if (!session || session.step !== 'waiting_for_text') {
-      return ctx.reply(
-        `❓ *Command or Message Not Recognized*\n\n` +
-        `Here is how you can use this Poster Bot:\n\n` +
-        `📝 *Custom Poster Bot Commands:*\n` +
-        `• /newpost or /start - Start creating a new post (accepts text messages and photos, allows sending immediately, adding to queue, or scheduling).\n` +
-        `• /queue - View all queued scheduled posts for your channel(s) and delete/cancel pending ones.\n` +
-        `• /cancel - Cancel draft post creation and discard details.`,
-        { parse_mode: 'Markdown' }
-      );
-    }
-
+    // Extract text/media from incoming message
     let text = null;
     let mediaType = 'text';
     let fileId = null;
@@ -401,31 +429,127 @@ function setupCustomBot(bot) {
     } else {
       return ctx.reply("⚠️ Sorry, this bot only supports text and photo posts. Please send a text or a photo.");
     }
-    
-    // Save draft in PostgreSQL database
-    await db.saveDraft(ctx.from.id, token, session.channelId, text, mediaType, fileId);
 
-    const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback('👁️ Preview', 'preview_post')],
-      [
-        Markup.button.callback('📤 Send Now', 'send_post'),
-        Markup.button.callback('📥 Add to Queue', 'add_to_queue')
-      ],
-      [
-        Markup.button.callback('🕒 Send with Delay', 'choose_delay'),
-        Markup.button.callback('❌ Cancel', 'cancel_post')
-      ]
-    ]);
+    const channels = await db.getChannelsByBot(token);
+    if (channels.length === 0) {
+      return ctx.reply("👋 Welcome! Please connect a channel using the main Controller Bot first.");
+    }
 
-    const description = mediaType === 'photo'
-      ? `📸 *Photo Draft saved!*${text ? ` (Caption: ${text.length} chars)` : ''}`
-      : `✍️ *Text Draft saved!* (${text.length} chars)`;
+    // Check if the message is a forwarded message
+    const isForwarded = ctx.message.forward_date || ctx.message.forward_from_chat || ctx.message.forward_from;
 
-    await ctx.reply(
-      `${description}\n\n` +
-      `Click *Preview* to see how it looks, *Send Now* to post immediately, *Add to Queue* to queue it, *Send with Delay* to schedule it with a custom delay, or *Cancel* to discard it.`,
-      { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
-    );
+    if (isForwarded) {
+      // Auto-queue immediately!
+      let targetChannel = channels[0];
+      
+      // If multiple channels, try to see if there is an active channel in session or draft
+      if (channels.length > 1) {
+        const existingDraft = await db.getDraft(ctx.from.id);
+        if (existingDraft) {
+          const matchCh = channels.find(c => String(c.channel_id) === String(existingDraft.channel_id));
+          if (matchCh) {
+            targetChannel = matchCh;
+          }
+        }
+      }
+
+      try {
+        const intervalMinutes = targetChannel.queue_interval || 1;
+        const latestRunAt = await db.getLatestQueuedPostRunAt(targetChannel.channel_id);
+        
+        let baseTime = Date.now();
+        if (latestRunAt) {
+          const latestTime = new Date(latestRunAt).getTime();
+          if (latestTime > baseTime) {
+            baseTime = latestTime;
+          }
+        }
+
+        const runAt = new Date(baseTime + intervalMinutes * 60 * 1000);
+
+        await db.schedulePost(
+          ctx.from.id,
+          token,
+          targetChannel.channel_id,
+          text,
+          mediaType,
+          fileId,
+          runAt,
+          true // is_queue = true
+        );
+
+        const timeString = runAt.toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+        const dateString = runAt.toLocaleDateString('en-US', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' });
+
+        return ctx.reply(
+          `📥 *Forwarded message auto-queued!*\n` +
+          `• Channel: *${targetChannel.title}*\n` +
+          `• Scheduled send: *${dateString} at ${timeString}*`,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (err) {
+        console.error('Auto-queue error:', err);
+        return ctx.reply(`❌ Failed to auto-queue forwarded post: ${err.message}`);
+      }
+    }
+
+    // Regular (non-forwarded) message: auto-detect as draft!
+    let targetChannelId = null;
+
+    if (session && session.step === 'waiting_for_text') {
+      targetChannelId = session.channelId;
+    } else if (channels.length === 1) {
+      targetChannelId = channels[0].channel_id;
+    }
+
+    if (targetChannelId) {
+      // Save draft and show send options directly
+      await db.saveDraft(ctx.from.id, token, targetChannelId, text, mediaType, fileId);
+
+      // Clean up session if it was waiting_for_text
+      if (session && session.step === 'waiting_for_text') {
+        sessions.delete(sessionKey);
+      }
+
+      const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback('👁️ Preview', 'preview_post')],
+        [
+          Markup.button.callback('📤 Send Now', 'send_post'),
+          Markup.button.callback('📥 Add to Queue', 'add_to_queue')
+        ],
+        [
+          Markup.button.callback('🕒 Send with Delay', 'choose_delay'),
+          Markup.button.callback('❌ Cancel', 'cancel_post')
+        ]
+      ]);
+
+      const description = mediaType === 'photo'
+        ? `📸 *Photo Draft saved!*${text ? ` (Caption: ${text.length} chars)` : ''}`
+        : `✍️ *Text Draft saved!* (${text.length} chars)`;
+
+      const channel = channels.find(c => String(c.channel_id) === String(targetChannelId));
+      const channelTitle = channel ? channel.title : 'Channel';
+
+      return ctx.reply(
+        `✍️ *Draft created for ${channelTitle}*\n\n` +
+        `Click *Preview* to see it, *Send Now* to post immediately, *Add to Queue* to queue it, or *Cancel* to discard.`,
+        { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
+      );
+    } else {
+      // Multiple channels and no target channel selected yet: save with channel_id = 0
+      await db.saveDraft(ctx.from.id, token, 0, text, mediaType, fileId);
+
+      const buttons = channels.map(ch => 
+        Markup.button.callback(ch.title, `sel_draft_ch:${ch.channel_id}`)
+      );
+      const keyboard = Markup.inlineKeyboard(buttons, { columns: 1 });
+
+      return ctx.reply(
+        `📝 *Post Draft saved!*\n\n` +
+        `Please choose the target channel for your post:`,
+        { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
+      );
+    }
   });
 }
 
