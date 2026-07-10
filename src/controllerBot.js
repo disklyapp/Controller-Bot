@@ -2,6 +2,34 @@ const { Telegraf, Markup } = require('telegraf');
 const db = require('./db');
 const botManager = require('./botManager');
 
+function formatInterval(minutes) {
+  if (minutes < 60) {
+    return `${minutes} Min${minutes > 1 ? 's' : ''}`;
+  }
+  const hours = minutes / 60;
+  return `${hours} Hour${hours > 1 ? 's' : ''}`;
+}
+
+function getIntervalKeyboard(channelId, prefix = 'setinitint') {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback('1 Min', `${prefix}:${channelId}:1`),
+      Markup.button.callback('5 Mins', `${prefix}:${channelId}:5`),
+      Markup.button.callback('30 Mins', `${prefix}:${channelId}:30`)
+    ],
+    [
+      Markup.button.callback('1 Hour', `${prefix}:${channelId}:60`),
+      Markup.button.callback('2 Hours', `${prefix}:${channelId}:120`),
+      Markup.button.callback('3 Hours', `${prefix}:${channelId}:180`)
+    ],
+    [
+      Markup.button.callback('6 Hours', `${prefix}:${channelId}:360`),
+      Markup.button.callback('12 Hours', `${prefix}:${channelId}:720`),
+      Markup.button.callback('24 Hours', `${prefix}:${channelId}:1440`)
+    ]
+  ]);
+}
+
 function setupControllerBot(bot) {
   // Global error handler for the main controller bot
   bot.catch((err, ctx) => {
@@ -66,18 +94,158 @@ function setupControllerBot(bot) {
       const botConfig = await db.getBot(channel.bot_token);
       const botUser = botConfig ? `@${botConfig.username}` : 'unknown bot';
       const channelLink = channel.username ? `@${channel.username}` : `ID: \`${channel.channel_id}\``;
+      const intervalText = formatInterval(channel.queue_interval || 1);
 
       const keyboard = Markup.inlineKeyboard([
-        Markup.button.callback('❌ Remove Channel', `remove_channel:${channel.channel_id}`)
+        [Markup.button.callback('⏱️ Set Queue Interval', `set_int_menu:${channel.channel_id}`)],
+        [Markup.button.callback('❌ Remove Channel', `remove_channel:${channel.channel_id}`)]
       ]);
 
       await ctx.reply(
         `📣 *${channel.title}*\n` +
         `• Destination: ${channelLink}\n` +
-        `• Posting Bot: ${botUser}`,
+        `• Posting Bot: ${botUser}\n` +
+        `• Queue Interval: *${intervalText}*`,
         { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
       );
     }
+  });
+
+  // Handle setting initial queue interval
+  bot.action(/^setinitint:(.+):(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const channelId = ctx.match[1];
+    const minutes = parseInt(ctx.match[2], 10);
+    const userId = ctx.from.id;
+
+    const channel = await db.getChannel(channelId);
+    if (!channel || String(channel.owner_id) !== String(userId)) {
+      return ctx.reply('❌ Channel not found or permission denied.');
+    }
+
+    await db.updateChannelInterval(channelId, minutes);
+    await db.updateUserStep(userId, 'idle', null);
+
+    const botConfig = await db.getBot(channel.bot_token);
+    const botUser = botConfig ? `@${botConfig.username}` : 'your custom bot';
+    const intervalText = formatInterval(minutes);
+
+    await ctx.editMessageText(
+      `🎉 *Channel Connection Complete!*\n\n` +
+      `📣 Channel: *${channel.title}*\n` +
+      `⏱️ Queue Interval: *${intervalText}*\n` +
+      `🤖 Posting Bot: ${botUser}\n\n` +
+      `👉 Go to ${botUser} and run /start to create and post messages!`,
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  // Handle skipping initial queue interval (keeping default 1 min)
+  bot.action(/^skipinitint:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const channelId = ctx.match[1];
+    const userId = ctx.from.id;
+
+    const channel = await db.getChannel(channelId);
+    if (!channel || String(channel.owner_id) !== String(userId)) {
+      return ctx.reply('❌ Channel not found or permission denied.');
+    }
+
+    await db.updateChannelInterval(channelId, 1);
+    await db.updateUserStep(userId, 'idle', null);
+
+    const botConfig = await db.getBot(channel.bot_token);
+    const botUser = botConfig ? `@${botConfig.username}` : 'your custom bot';
+
+    await ctx.editMessageText(
+      `🎉 *Channel Connection Complete!*\n\n` +
+      `📣 Channel: *${channel.title}*\n` +
+      `⏱️ Queue Interval: *1 Min (Default)*\n` +
+      `🤖 Posting Bot: ${botUser}\n\n` +
+      `👉 Go to ${botUser} and run /start to create and post messages!`,
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  // Handle set queue interval menu from /mychannels
+  bot.action(/^set_int_menu:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const channelId = ctx.match[1];
+    const userId = ctx.from.id;
+
+    const channel = await db.getChannel(channelId);
+    if (!channel || String(channel.owner_id) !== String(userId)) {
+      return ctx.reply('❌ Channel not found or permission denied.');
+    }
+
+    const keyboard = getIntervalKeyboard(channelId, 'chgint');
+    const buttons = keyboard.reply_markup.inline_keyboard;
+    buttons.push([Markup.button.callback('↩️ Back to Channel Info', `back_to_channel:${channelId}`)]);
+
+    const intervalText = formatInterval(channel.queue_interval || 1);
+
+    await ctx.editMessageText(
+      `⏱️ *Set Queue Interval for ${channel.title}*\n\n` +
+      `Current Queue Interval: *${intervalText}*\n\n` +
+      `Choose a new queue interval:`,
+      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } }
+    );
+  });
+
+  // Handle updating queue interval
+  bot.action(/^chgint:(.+):(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const channelId = ctx.match[1];
+    const minutes = parseInt(ctx.match[2], 10);
+    const userId = ctx.from.id;
+
+    const channel = await db.getChannel(channelId);
+    if (!channel || String(channel.owner_id) !== String(userId)) {
+      return ctx.reply('❌ Channel not found or permission denied.');
+    }
+
+    await db.updateChannelInterval(channelId, minutes);
+    const intervalText = formatInterval(minutes);
+
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('↩️ Back to Channel Info', `back_to_channel:${channelId}`)]
+    ]);
+
+    await ctx.editMessageText(
+      `✅ *Queue Interval Updated!*\n\n` +
+      `The queue interval for *${channel.title}* is now set to *${intervalText}*.`,
+      { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
+    );
+  });
+
+  // Handle back to channel info
+  bot.action(/^back_to_channel:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const channelId = ctx.match[1];
+    const userId = ctx.from.id;
+
+    const channel = await db.getChannel(channelId);
+    if (!channel || String(channel.owner_id) !== String(userId)) {
+      return ctx.reply('❌ Channel not found or permission denied.');
+    }
+
+    const botConfig = await db.getBot(channel.bot_token);
+    const botUser = botConfig ? `@${botConfig.username}` : 'unknown bot';
+    const channelLink = channel.username ? `@${channel.username}` : `ID: \`${channel.channel_id}\``;
+    const intervalText = formatInterval(channel.queue_interval || 1);
+
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('⏱️ Set Queue Interval', `set_int_menu:${channel.channel_id}`)],
+      [Markup.button.callback('❌ Remove Channel', `remove_channel:${channel.channel_id}`)]
+    ]);
+
+    await ctx.editMessageText(
+      `📣 *${channel.title}*\n` +
+      `• Destination: ${channelLink}\n` +
+      `• Posting Bot: ${botUser}\n` +
+      `• Queue Interval: *${intervalText}*`,
+      { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
+    );
   });
 
   // Handle Remove Channel Callback
@@ -225,18 +393,20 @@ function setupControllerBot(bot) {
           userId
         );
 
-        // Reset wizard status
-        await db.updateUserStep(userId, 'idle', null);
+        // Update step to waiting_for_queue_interval
+        await db.updateUserStep(userId, 'waiting_for_queue_interval', chat.id.toString());
 
         await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
 
+        const keyboard = getIntervalKeyboard(chat.id, 'setinitint');
+        const buttons = keyboard.reply_markup.inline_keyboard;
+        buttons.push([Markup.button.callback('⏭️ Skip / Use Default (1 Min)', `skipinitint:${chat.id}`)]);
+
         await ctx.reply(
-          `🎉 *Channel successfully connected!*\n\n` +
-          `Channel: *${chat.title}*\n` +
-          `Username: ${chat.username ? `@${chat.username}` : 'Private'}\n` +
-          `Posting Bot: @${botMe.username}\n\n` +
-          `👉 Go to @${botMe.username} and run /start to create and post messages!`,
-          { parse_mode: 'Markdown' }
+          `🎉 *Channel connected:* *${chat.title}*\n\n` +
+          `Now, please select the *Queue Interval Time* for this channel. ` +
+          `This determines the time delay between sequential queued posts.`,
+          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } }
         );
       } catch (err) {
         console.error('Channel connection error:', err);
@@ -250,6 +420,11 @@ function setupControllerBot(bot) {
         );
       }
       return;
+    }
+
+    // STEP 3: Waiting for queue interval selection
+    if (user.step === 'waiting_for_queue_interval') {
+      return ctx.reply('⚠️ Please select a queue interval from the buttons above, or click Skip / Use Default, or send /cancel.');
     }
 
     // Default reply

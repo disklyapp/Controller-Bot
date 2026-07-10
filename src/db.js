@@ -50,7 +50,8 @@ async function initDb() {
         title VARCHAR(255) NOT NULL,
         username VARCHAR(255),
         bot_token TEXT REFERENCES bots(token) ON DELETE CASCADE,
-        owner_id BIGINT NOT NULL
+        owner_id BIGINT NOT NULL,
+        queue_interval INTEGER DEFAULT 1
       )
     `);
 
@@ -71,6 +72,8 @@ async function initDb() {
       ALTER TABLE drafts ADD COLUMN IF NOT EXISTS media_type VARCHAR(50) DEFAULT 'text';
       ALTER TABLE drafts ADD COLUMN IF NOT EXISTS file_id TEXT;
       ALTER TABLE drafts ALTER COLUMN text DROP NOT NULL;
+      ALTER TABLE channels ADD COLUMN IF NOT EXISTS queue_interval INTEGER DEFAULT 1;
+      ALTER TABLE scheduled_posts ADD COLUMN IF NOT EXISTS is_queue BOOLEAN DEFAULT FALSE;
     `);
 
     // Scheduled posts table
@@ -83,7 +86,8 @@ async function initDb() {
         text TEXT,
         media_type VARCHAR(50) DEFAULT 'text',
         file_id TEXT,
-        run_at TIMESTAMP WITH TIME ZONE NOT NULL
+        run_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        is_queue BOOLEAN DEFAULT FALSE
       )
     `);
 
@@ -220,12 +224,12 @@ async function clearDraft(userId) {
 
 // --- SCHEDULED POSTS OPERATIONS ---
 
-async function schedulePost(userId, botToken, channelId, text, mediaType, fileId, runAt) {
+async function schedulePost(userId, botToken, channelId, text, mediaType, fileId, runAt, isQueue = false) {
   const res = await pool.query(
-    `INSERT INTO scheduled_posts (user_id, bot_token, channel_id, text, media_type, file_id, run_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO scheduled_posts (user_id, bot_token, channel_id, text, media_type, file_id, run_at, is_queue)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING *`,
-    [userId, botToken, channelId, text, mediaType, fileId, runAt]
+    [userId, botToken, channelId, text, mediaType, fileId, runAt, isQueue]
   );
   return res.rows[0];
 }
@@ -243,6 +247,30 @@ async function deleteScheduledPost(id) {
     [id]
   );
   return res.rows[0] || null;
+}
+
+async function updateChannelInterval(channelId, queueInterval) {
+  const res = await pool.query(
+    'UPDATE channels SET queue_interval = $2 WHERE channel_id = $1 RETURNING *',
+    [channelId, queueInterval]
+  );
+  return res.rows[0];
+}
+
+async function getLatestQueuedPostRunAt(channelId) {
+  const res = await pool.query(
+    'SELECT MAX(run_at) as max_run FROM scheduled_posts WHERE channel_id = $1 AND is_queue = true',
+    [channelId]
+  );
+  return res.rows[0] ? res.rows[0].max_run : null;
+}
+
+async function getScheduledPostsForChannel(channelId) {
+  const res = await pool.query(
+    'SELECT * FROM scheduled_posts WHERE channel_id = $1 ORDER BY run_at ASC',
+    [channelId]
+  );
+  return res.rows;
 }
 
 module.exports = {
@@ -265,5 +293,8 @@ module.exports = {
   clearDraft,
   schedulePost,
   getDueScheduledPosts,
-  deleteScheduledPost
+  deleteScheduledPost,
+  updateChannelInterval,
+  getLatestQueuedPostRunAt,
+  getScheduledPostsForChannel
 };

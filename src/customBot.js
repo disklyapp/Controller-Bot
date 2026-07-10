@@ -1,6 +1,14 @@
 const { Markup } = require('telegraf');
 const db = require('./db');
 
+function formatInterval(minutes) {
+  if (minutes < 60) {
+    return `${minutes} Min${minutes > 1 ? 's' : ''}`;
+  }
+  const hours = minutes / 60;
+  return `${hours} Hour${hours > 1 ? 's' : ''}`;
+}
+
 // In-memory sessions to track user steps for each custom bot
 // Key: `${userId}:${botToken}`, Value: { channelId, step }
 const sessions = new Map();
@@ -181,9 +189,12 @@ function setupCustomBot(bot) {
       [Markup.button.callback('👁️ Preview', 'preview_post')],
       [
         Markup.button.callback('📤 Send Now', 'send_post'),
-        Markup.button.callback('🕒 Send with Delay', 'choose_delay')
+        Markup.button.callback('📥 Add to Queue', 'add_to_queue')
       ],
-      [Markup.button.callback('❌ Cancel', 'cancel_post')]
+      [
+        Markup.button.callback('🕒 Send with Delay', 'choose_delay'),
+        Markup.button.callback('❌ Cancel', 'cancel_post')
+      ]
     ]);
 
     const description = draft.media_type === 'photo'
@@ -192,7 +203,7 @@ function setupCustomBot(bot) {
 
     await ctx.editMessageText(
       `${description}\n\n` +
-      `Click *Preview* to see how it looks, *Send Now* to post immediately, *Send with Delay* to set an interval, or *Cancel* to discard it.`,
+      `Click *Preview* to see how it looks, *Send Now* to post immediately, *Add to Queue* to queue it, *Send with Delay* to schedule it with a custom delay, or *Cancel* to discard it.`,
       { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
     );
   });
@@ -288,9 +299,12 @@ function setupCustomBot(bot) {
       [Markup.button.callback('👁️ Preview', 'preview_post')],
       [
         Markup.button.callback('📤 Send Now', 'send_post'),
-        Markup.button.callback('🕒 Send with Delay', 'choose_delay')
+        Markup.button.callback('📥 Add to Queue', 'add_to_queue')
       ],
-      [Markup.button.callback('❌ Cancel', 'cancel_post')]
+      [
+        Markup.button.callback('🕒 Send with Delay', 'choose_delay'),
+        Markup.button.callback('❌ Cancel', 'cancel_post')
+      ]
     ]);
 
     const description = mediaType === 'photo'
@@ -299,10 +313,159 @@ function setupCustomBot(bot) {
 
     await ctx.reply(
       `${description}\n\n` +
-      `Click *Preview* to see how it looks, *Send Now* to post immediately, *Send with Delay* to set an interval, or *Cancel* to discard it.`,
+      `Click *Preview* to see how it looks, *Send Now* to post immediately, *Add to Queue* to queue it, *Send with Delay* to schedule it with a custom delay, or *Cancel* to discard it.`,
       { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
     );
   });
+
+  // Handle Add to Queue execution
+  bot.action('add_to_queue', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const token = ctx.telegram.token;
+
+    const draft = await db.getDraft(userId);
+    if (!draft) {
+      return ctx.reply("❌ No active draft found.");
+    }
+
+    try {
+      const channel = await db.getChannel(draft.channel_id);
+      const intervalMinutes = channel ? (channel.queue_interval || 1) : 1;
+
+      const latestRunAt = await db.getLatestQueuedPostRunAt(draft.channel_id);
+      
+      let baseTime = Date.now();
+      if (latestRunAt) {
+        const latestTime = new Date(latestRunAt).getTime();
+        if (latestTime > baseTime) {
+          baseTime = latestTime;
+        }
+      }
+
+      const runAt = new Date(baseTime + intervalMinutes * 60 * 1000);
+
+      await db.schedulePost(
+        userId,
+        token,
+        draft.channel_id,
+        draft.text,
+        draft.media_type,
+        draft.file_id,
+        runAt,
+        true
+      );
+
+      await db.clearDraft(userId);
+
+      const sessionKey = `${userId}:${token}`;
+      sessions.delete(sessionKey);
+
+      const timeString = runAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const dateString = runAt.toLocaleDateString([], { month: 'short', day: 'numeric' });
+
+      await ctx.editMessageText(
+        `📥 *Post successfully added to Queue!*\n\n` +
+        `• Queue Interval: *${formatInterval(intervalMinutes)}*\n` +
+        `• Scheduled to send on: *${dateString} at ${timeString}*`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (err) {
+      console.error('Queue scheduling error:', err);
+      await ctx.reply(`❌ Failed to add post to queue: ${err.message}`);
+    }
+  });
+
+  // Handle Queue viewing and management
+  bot.command('queue', async (ctx) => {
+    const token = ctx.telegram.token;
+    const channels = await db.getChannelsByBot(token);
+
+    if (channels.length === 0) {
+      return ctx.reply("❌ No channels connected to this bot yet.");
+    }
+
+    if (channels.length === 1) {
+      return showChannelQueue(ctx, channels[0].channel_id);
+    } else {
+      const buttons = channels.map(ch => 
+        Markup.button.callback(ch.title, `view_queue_ch:${ch.channel_id}`)
+      );
+      const keyboard = Markup.inlineKeyboard(buttons, { columns: 1 });
+
+      return ctx.reply("Please choose the target channel to view its queue:", keyboard);
+    }
+  });
+
+  bot.action(/^view_queue_ch:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const channelId = ctx.match[1];
+    return showChannelQueue(ctx, channelId, true);
+  });
+
+  bot.action(/^del_q_post:(\d+):(.+)$/, async (ctx) => {
+    const postId = parseInt(ctx.match[1], 10);
+    const channelId = ctx.match[2];
+
+    const deleted = await db.deleteScheduledPost(postId);
+    if (deleted) {
+      await ctx.answerCbQuery("Post deleted from queue.");
+    } else {
+      await ctx.answerCbQuery("Post not found or already sent.");
+    }
+
+    return showChannelQueue(ctx, channelId, true);
+  });
+}
+
+async function showChannelQueue(ctx, channelId, editMessage = false) {
+  const channel = await db.getChannel(channelId);
+  if (!channel) {
+    const text = "❌ Channel not found.";
+    return editMessage ? ctx.editMessageText(text) : ctx.reply(text);
+  }
+
+  const posts = await db.getScheduledPostsForChannel(channelId);
+  const queuedPosts = posts.filter(p => p.is_queue);
+
+  if (queuedPosts.length === 0) {
+    const text = `📭 *Queue is empty for channel: ${channel.title}*\n\nSend /newpost to start queuing posts.`;
+    return editMessage ? ctx.editMessageText(text, { parse_mode: 'Markdown' }) : ctx.reply(text, { parse_mode: 'Markdown' });
+  }
+
+  let text = `📅 *Queue for channel: ${channel.title}*\n`;
+  text += `⏱️ *Queue Interval:* ${formatInterval(channel.queue_interval || 1)}\n\n`;
+
+  const keyboardButtons = [];
+
+  queuedPosts.forEach((post, index) => {
+    const runAt = new Date(post.run_at);
+    const timeString = runAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const dateString = runAt.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    
+    let contentSnippet = '';
+    if (post.text) {
+      contentSnippet = post.text.replace(/\n/g, ' ').substring(0, 30);
+      if (post.text.length > 30) contentSnippet += '...';
+    } else if (post.media_type === 'photo') {
+      contentSnippet = '[Photo]';
+    }
+
+    text += `*#${index + 1}* • ${dateString} at ${timeString}\n`;
+    text += `   📝 \`${contentSnippet}\`\n\n`;
+
+    keyboardButtons.push([
+      Markup.button.callback(`❌ Delete #${index + 1}`, `del_q_post:${post.id}:${channelId}`)
+    ]);
+  });
+
+  const keyboard = Markup.inlineKeyboard(keyboardButtons);
+
+  if (editMessage) {
+    return ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup });
+  } else {
+    return ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup });
+  }
 }
 
 module.exports = {
