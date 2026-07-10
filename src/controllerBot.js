@@ -31,6 +31,14 @@ function getIntervalKeyboard(channelId, prefix = 'setinitint') {
 }
 
 function setupControllerBot(bot) {
+  // Register commands with Telegram to show in the [/] Menu button
+  bot.telegram.setMyCommands([
+    { command: 'start', description: 'Start the bot and see welcome guide' },
+    { command: 'addchannel', description: 'Connect a new Telegram channel' },
+    { command: 'mychannels', description: 'View and manage connected channels' },
+    { command: 'cancel', description: 'Cancel active setup wizard' }
+  ]).catch(err => console.error('Failed to set commands for main bot:', err.message));
+
   // Global error handler for the main controller bot
   bot.catch((err, ctx) => {
     console.error('Error in Main Controller Bot:', err);

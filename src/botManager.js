@@ -25,6 +25,13 @@ async function startBot(token) {
     // Setup handlers
     setupCustomBot(bot);
 
+    // Register commands with Telegram to show in the [/] Menu button
+    bot.telegram.setMyCommands([
+      { command: 'newpost', description: 'Create a new post draft' },
+      { command: 'queue', description: 'View active scheduled posts queue' },
+      { command: 'cancel', description: 'Cancel current post draft' }
+    ]).catch(err => console.error(`Failed to set commands for bot @${botInfo.username}:`, err.message));
+
     // Global error handler for this specific bot instance
     bot.catch((err, ctx) => {
       console.error(`Error in bot @${botInfo.username}:`, err);
