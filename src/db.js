@@ -67,15 +67,6 @@ async function initDb() {
       )
     `);
 
-    // Run safe migrations in case the database already exists
-    await client.query(`
-      ALTER TABLE drafts ADD COLUMN IF NOT EXISTS media_type VARCHAR(50) DEFAULT 'text';
-      ALTER TABLE drafts ADD COLUMN IF NOT EXISTS file_id TEXT;
-      ALTER TABLE drafts ALTER COLUMN text DROP NOT NULL;
-      ALTER TABLE channels ADD COLUMN IF NOT EXISTS queue_interval INTEGER DEFAULT 1;
-      ALTER TABLE scheduled_posts ADD COLUMN IF NOT EXISTS is_queue BOOLEAN DEFAULT FALSE;
-    `);
-
     // Scheduled posts table
     await client.query(`
       CREATE TABLE IF NOT EXISTS scheduled_posts (
@@ -89,6 +80,15 @@ async function initDb() {
         run_at TIMESTAMP WITH TIME ZONE NOT NULL,
         is_queue BOOLEAN DEFAULT FALSE
       )
+    `);
+
+    // Run safe migrations in case the database already exists
+    await client.query(`
+      ALTER TABLE drafts ADD COLUMN IF NOT EXISTS media_type VARCHAR(50) DEFAULT 'text';
+      ALTER TABLE drafts ADD COLUMN IF NOT EXISTS file_id TEXT;
+      ALTER TABLE drafts ALTER COLUMN text DROP NOT NULL;
+      ALTER TABLE channels ADD COLUMN IF NOT EXISTS queue_interval INTEGER DEFAULT 1;
+      ALTER TABLE scheduled_posts ADD COLUMN IF NOT EXISTS is_queue BOOLEAN DEFAULT FALSE;
     `);
 
     await client.query('COMMIT');
