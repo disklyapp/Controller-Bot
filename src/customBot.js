@@ -1,5 +1,6 @@
 const { Markup } = require('telegraf');
 const db = require('./db');
+const queueManager = require('./queue');
 
 function formatInterval(minutes) {
   if (minutes < 60) {
@@ -224,7 +225,7 @@ function setupCustomBot(bot) {
       const runAt = new Date(Date.now() + minutes * 60 * 1000);
 
       // Save to scheduled posts table
-      await db.schedulePost(
+      const post = await db.schedulePost(
         userId,
         token,
         draft.channel_id,
@@ -233,6 +234,9 @@ function setupCustomBot(bot) {
         draft.file_id,
         runAt
       );
+
+      // Enqueue into Redis BullMQ Queue
+      await queueManager.addScheduledJob(post.id, post.run_at);
 
       // Clear active draft
       await db.clearDraft(userId);
@@ -295,7 +299,7 @@ function setupCustomBot(bot) {
 
       const runAt = new Date(baseTime + intervalMinutes * 60 * 1000);
 
-      await db.schedulePost(
+      const post = await db.schedulePost(
         userId,
         token,
         draft.channel_id,
@@ -305,6 +309,9 @@ function setupCustomBot(bot) {
         runAt,
         true
       );
+
+      // Enqueue into Redis BullMQ Queue
+      await queueManager.addScheduledJob(post.id, post.run_at);
 
       await db.clearDraft(userId);
 
@@ -359,6 +366,7 @@ function setupCustomBot(bot) {
 
     const deleted = await db.deleteScheduledPost(postId);
     if (deleted) {
+      await queueManager.removeScheduledJob(postId);
       await ctx.answerCbQuery("Post deleted from queue.");
     } else {
       await ctx.answerCbQuery("Post not found or already sent.");
@@ -467,7 +475,7 @@ function setupCustomBot(bot) {
 
         const runAt = new Date(baseTime + intervalMinutes * 60 * 1000);
 
-        await db.schedulePost(
+        const post = await db.schedulePost(
           ctx.from.id,
           token,
           targetChannel.channel_id,
@@ -477,6 +485,9 @@ function setupCustomBot(bot) {
           runAt,
           true // is_queue = true
         );
+
+        // Enqueue into Redis BullMQ Queue
+        await queueManager.addScheduledJob(post.id, post.run_at);
 
         const timeString = runAt.toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
         const dateString = runAt.toLocaleDateString('en-US', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' });

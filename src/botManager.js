@@ -107,6 +107,8 @@ async function stopAll() {
 /**
  * Retrieve a running bot instance
  */
+const queueManager = require('./queue');
+
 function getRunningBot(token) {
   return runningBots.get(token) || null;
 }
@@ -114,28 +116,26 @@ function getRunningBot(token) {
 let schedulerIntervalId = null;
 
 /**
- * Checks for due scheduled posts, sends them, and cleans up the queue
+ * Fallback check for due scheduled posts in database
  */
 async function checkScheduledPosts() {
   const checkTime = new Date();
-  console.log(`⏰ [Scheduler] Checking database for due scheduled posts at ${checkTime.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })} (IST)...`);
   try {
     const duePosts = await db.getDueScheduledPosts();
-    console.log(`⏰ [Scheduler] Query complete. Found ${duePosts.length} due scheduled post(s) to process.`);
     if (duePosts.length === 0) return;
 
-    console.log(`⏰ [Scheduler] Processing ${duePosts.length} due scheduled post(s)...`);
+    console.log(`⏰ [Scheduler Failsafe] Found ${duePosts.length} due scheduled post(s) to process.`);
 
     for (const post of duePosts) {
       const bot = runningBots.get(post.bot_token);
       if (!bot) {
-        console.error(`❌ [Scheduler] Bot with token ${post.bot_token.substring(0, 10)}... is not active. Skipping post ID ${post.id}.`);
+        console.error(`❌ [Scheduler Failsafe] Bot with token ${post.bot_token.substring(0, 10)}... is not active. Skipping post ID ${post.id}.`);
         await db.deleteScheduledPost(post.id);
         continue;
       }
 
       try {
-        console.log(`📤 [Scheduler] Sending scheduled post ID ${post.id} to channel ${post.channel_id}...`);
+        console.log(`📤 [Scheduler Failsafe] Sending scheduled post ID ${post.id} to channel ${post.channel_id}...`);
         
         if (post.media_type === 'photo') {
           await bot.telegram.sendPhoto(post.channel_id, post.file_id, { caption: post.text || undefined });
@@ -150,9 +150,9 @@ async function checkScheduledPosts() {
           { parse_mode: 'Markdown' }
         ).catch(() => {});
 
-        console.log(`✅ [Scheduler] Post ID ${post.id} successfully sent.`);
+        console.log(`✅ [Scheduler Failsafe] Post ID ${post.id} successfully sent.`);
       } catch (sendErr) {
-        console.error(`❌ [Scheduler] Error sending post ID ${post.id}:`, sendErr.message);
+        console.error(`❌ [Scheduler Failsafe] Error sending post ID ${post.id}:`, sendErr.message);
         
         // Notify user of failure
         await bot.telegram.sendMessage(
@@ -166,28 +166,36 @@ async function checkScheduledPosts() {
       await db.deleteScheduledPost(post.id);
     }
   } catch (err) {
-    console.error('❌ [Scheduler] Error checking due scheduled posts:', err);
+    console.error('❌ [Scheduler Failsafe] Error checking due scheduled posts:', err);
   }
 }
 
 /**
- * Start the background scheduler check
+ * Start the background Redis queue worker and scheduler check
  */
-function startScheduler(intervalMs = 30000) { // Every 30 seconds by default
-  if (schedulerIntervalId) return;
-  console.log('⏰ Starting background scheduler worker (checking every 30s)...');
-  schedulerIntervalId = setInterval(checkScheduledPosts, intervalMs);
+async function startScheduler(intervalMs = 30000) {
+  // Initialize Redis BullMQ Worker
+  queueManager.initQueueWorker(getRunningBot);
+  
+  // Sync DB scheduled posts with Redis queue on startup
+  await queueManager.syncQueueWithDb();
+
+  if (!schedulerIntervalId) {
+    console.log('⏰ Starting background scheduler failsafe polling (checking every 30s)...');
+    schedulerIntervalId = setInterval(checkScheduledPosts, intervalMs);
+  }
 }
 
 /**
- * Stop the background scheduler check
+ * Stop the background scheduler worker and Redis queue
  */
-function stopScheduler() {
+async function stopScheduler() {
   if (schedulerIntervalId) {
-    console.log('🛑 Stopping background scheduler worker...');
+    console.log('🛑 Stopping background scheduler failsafe polling...');
     clearInterval(schedulerIntervalId);
     schedulerIntervalId = null;
   }
+  await queueManager.closeQueue();
 }
 
 module.exports = {
@@ -199,3 +207,4 @@ module.exports = {
   startScheduler,
   stopScheduler
 };
+
