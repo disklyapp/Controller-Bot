@@ -354,6 +354,17 @@ function setupControllerBot(bot) {
       if (ctx.message.forward_from_chat && ctx.message.forward_from_chat.type === 'channel') {
         targetChatId = ctx.message.forward_from_chat.id;
       } else if (directText) {
+        // Check if user sent an invite link
+        if (directText.includes('t.me/') || directText.startsWith('+') || directText.startsWith('https://')) {
+          return ctx.reply(
+            `⚠️ *Invite links cannot be used directly to connect channels.*\n\n` +
+            `👉 *How to connect your channel:*\n` +
+            `1. Open your Telegram channel.\n` +
+            `2. *Forward any message* from that channel into this chat.\n\n` +
+            `OR if it is a public channel, send its \`@username\` (e.g. \`@mychannel\`).`,
+            { parse_mode: 'Markdown' }
+          );
+        }
         // Support both @channel and numeric ID
         targetChatId = directText;
       }
@@ -378,7 +389,7 @@ function setupControllerBot(bot) {
 
         if (chat.type !== 'channel') {
           await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-          return ctx.reply('❌ That is not a channel. You can only connect channels. Please send a channel username or ID.');
+          return ctx.reply('❌ That is not a channel. You can only connect channels. Please forward a message from your channel or send a channel username.');
         }
 
         // Verify if custom bot is administrator in the channel
@@ -389,7 +400,7 @@ function setupControllerBot(bot) {
 
         if (!isBotAdmin) {
           await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-          return ctx.reply(`❌ The bot @${botMe.username} is not an administrator in that channel. Please add it as an administrator with posting rights first.`);
+          return ctx.reply(`❌ The bot @${botMe.username} is not an administrator in that channel. Please add @${botMe.username} as an Administrator in your channel with Post Messages permission first.`);
         }
 
         // Add channel connection
@@ -417,18 +428,28 @@ function setupControllerBot(bot) {
           { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } }
         );
       } catch (err) {
-        console.error('Channel connection error:', err);
         await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-        await ctx.reply(
-          `❌ *Connection failed:* ${err.message}\n\n` +
-          `Make sure:\n` +
-          `1. The username or ID is correct.\n` +
-          `2. Your custom bot has been added to the channel as an Administrator with *Post Messages* permission.\n\n` +
-          `Please check and try again, or send /cancel to abort.`
-        );
+        
+        if (err.message && err.message.includes('chat not found')) {
+          await ctx.reply(
+            `❌ *Channel Not Found*\n\n` +
+            `👉 *To fix this:*\n` +
+            `• For **Private Channels**: Please **FORWARD ANY MESSAGE** from your channel into this chat.\n` +
+            `• For **Public Channels**: Type the username starting with \`@\` (e.g. \`@mychannel\`).\n` +
+            `• Make sure your custom bot has been added as an **Administrator** in the channel first!`,
+            { parse_mode: 'Markdown' }
+          );
+        } else {
+          await ctx.reply(
+            `❌ *Connection failed:* ${err.message}\n\n` +
+            `Please make sure your custom bot is an Administrator in the channel with Post Messages permission, then try again or send /cancel.`,
+            { parse_mode: 'Markdown' }
+          );
+        }
       }
       return;
     }
+
 
     // STEP 3: Waiting for queue interval selection
     if (user.step === 'waiting_for_queue_interval') {
