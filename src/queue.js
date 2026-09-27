@@ -3,13 +3,39 @@ const IORedis = require('ioredis');
 const db = require('./db');
 require('dotenv').config({ override: true });
 
-const redisUrl = process.env.REDIS_URL || 'redis://default:kUmJPwOOwBRCbSSVNtPzNxDvSRmcHhco@iriguchi.proxy.rlwy.net:50293';
+function getRedisUrl() {
+  let rawUrl = process.env.REDIS_URL || process.env.REDISPRIVATE_URL;
+  const defaultPassword = process.env.REDISPASSWORD || process.env.REDIS_PASSWORD || 'kUmJPwOOwBRCbSSVNtPzNxDvSRmcHhco';
+  const defaultUser = process.env.REDISUSER || 'default';
+
+  if (!rawUrl) {
+    return `redis://${defaultUser}:${defaultPassword}@iriguchi.proxy.rlwy.net:50293`;
+  }
+
+  rawUrl = rawUrl.trim();
+
+  if (rawUrl.startsWith('redis://') || rawUrl.startsWith('rediss://')) {
+    if (!rawUrl.includes('@')) {
+      const scheme = rawUrl.startsWith('rediss://') ? 'rediss://' : 'redis://';
+      const clean = rawUrl.replace(/^(redis|rediss):\/\//, '');
+      return `${scheme}${defaultUser}:${defaultPassword}@${clean}`;
+    }
+    return rawUrl;
+  }
+
+  // If user provided raw hostname like "redis.railway.internal" or "iriguchi.proxy.rlwy.net:50293"
+  const port = rawUrl.includes(':') ? '' : ':6379';
+  return `redis://${defaultUser}:${defaultPassword}@${rawUrl}${port}`;
+}
+
+const redisUrl = getRedisUrl();
 
 // Setup IORedis connection for BullMQ
 const connection = new IORedis(redisUrl, {
   maxRetriesPerRequest: null,
   enableReadyCheck: false
 });
+
 
 connection.on('connect', () => {
   console.log('✅ Connected to Redis instance for post queue.');

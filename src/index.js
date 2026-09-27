@@ -53,7 +53,7 @@ async function main() {
   }
 
   // 4.5. Start background scheduled posts checking worker
-  botManager.startScheduler();
+  await botManager.startScheduler();
 
   console.log('✨ System is fully operational.');
 

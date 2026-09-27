@@ -1,20 +1,42 @@
 const { Pool } = require('pg');
 require('dotenv').config({ override: true });
 
-const connectionString = process.env.DATABASE_URL;
+function getDatabaseUrl() {
+  let rawUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  const defaultPassword = process.env.PGPASSWORD || process.env.POSTGRES_PASSWORD || 'NoAYNPbJLkVIDIvKciqNMvQkKyAOZdlL';
+  const defaultUser = process.env.PGUSER || process.env.POSTGRES_USER || 'postgres';
+  const defaultDb = process.env.PGDATABASE || process.env.POSTGRES_DB || 'railway';
 
-if (!connectionString) {
-  console.error('❌ Error: DATABASE_URL environment variable is missing!');
-  process.exit(1);
+  if (!rawUrl) {
+    return `postgresql://${defaultUser}:${defaultPassword}@crossover.proxy.rlwy.net:24012/${defaultDb}`;
+  }
+
+  rawUrl = rawUrl.trim();
+
+  // If user provided full valid URL scheme
+  if (rawUrl.startsWith('postgresql://') || rawUrl.startsWith('postgres://')) {
+    if (!rawUrl.includes('@')) {
+      const clean = rawUrl.replace(/^postgresql:\/\//, '').replace(/^postgres:\/\//, '');
+      return `postgresql://${defaultUser}:${defaultPassword}@${clean}`;
+    }
+    return rawUrl;
+  }
+
+  // If user provided raw hostname like "postgres-msgo.railway.internal" or "crossover.proxy.rlwy.net:24012"
+  const port = rawUrl.includes(':') ? '' : ':5432';
+  return `postgresql://${defaultUser}:${defaultPassword}@${rawUrl}${port}/${defaultDb}`;
 }
+
+const connectionString = getDatabaseUrl();
 
 // Support SSL connections if running on cloud databases like Heroku, Supabase, Neon
 const pool = new Pool({
   connectionString,
-  ssl: connectionString.includes('localhost') || connectionString.includes('127.0.0.1')
+  ssl: connectionString.includes('localhost') || connectionString.includes('127.0.0.1') || connectionString.includes('.railway.internal')
     ? false
     : { rejectUnauthorized: false }
 });
+
 
 /**
  * Initialize Database Schema
