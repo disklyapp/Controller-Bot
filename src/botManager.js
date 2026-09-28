@@ -1,6 +1,8 @@
 const { Telegraf } = require('telegraf');
 const db = require('./db');
 const { setupCustomBot } = require('./customBot');
+const { sendPostToChannel } = require('./utils');
+
 
 // Keep track of active Telegraf instances by token
 // Key: botToken, Value: Telegraf instance
@@ -137,11 +139,8 @@ async function checkScheduledPosts() {
       try {
         console.log(`📤 [Scheduler Failsafe] Sending scheduled post ID ${post.id} to channel ${post.channel_id}...`);
         
-        if (post.media_type === 'photo') {
-          await bot.telegram.sendPhoto(post.channel_id, post.file_id, { caption: post.text || undefined });
-        } else {
-          await bot.telegram.sendMessage(post.channel_id, post.text);
-        }
+        await sendPostToChannel(bot.telegram, post.channel_id, post.media_type, post.file_id, post.text);
+
 
         // Notify user of success
         await bot.telegram.sendMessage(

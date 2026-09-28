@@ -1,7 +1,9 @@
 const { Queue, Worker } = require('bullmq');
 const IORedis = require('ioredis');
 const db = require('./db');
+const { sendPostToChannel } = require('./utils');
 require('dotenv').config({ override: true });
+
 
 function getRedisUrl() {
   let rawUrl = process.env.REDIS_URL || process.env.REDISPRIVATE_URL;
@@ -127,11 +129,9 @@ function initQueueWorker(getRunningBotFn) {
       try {
         console.log(`📤 [Redis Queue Worker] Sending scheduled post ID ${post.id} to channel ${post.channel_id}...`);
 
-        if (post.media_type === 'photo') {
-          await bot.telegram.sendPhoto(post.channel_id, post.file_id, { caption: post.text || undefined });
-        } else {
-          await bot.telegram.sendMessage(post.channel_id, post.text);
-        }
+        await sendPostToChannel(bot.telegram, post.channel_id, post.media_type, post.file_id, post.text);
+
+
 
         // Notify user of success
         await bot.telegram.sendMessage(

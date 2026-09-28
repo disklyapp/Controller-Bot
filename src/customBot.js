@@ -1,6 +1,7 @@
 const { Markup } = require('telegraf');
 const db = require('./db');
 const queueManager = require('./queue');
+const { sendPostToChannel, replyWithPreview, getMediaDescription } = require('./utils');
 
 function formatInterval(minutes) {
   if (minutes < 60) {
@@ -14,7 +15,32 @@ function formatInterval(minutes) {
 // Key: `${userId}:${botToken}`, Value: { channelId, step }
 const sessions = new Map();
 
+// In-memory atomic tracker for last queued timestamp per channel to prevent race conditions during bulk forwards
+const channelLastQueuedTime = new Map();
+
+async function calculateNextQueueRunAt(channelId, intervalMinutes) {
+  let baseTime = Date.now();
+
+  const lastMemoryTime = channelLastQueuedTime.get(channelId);
+  if (lastMemoryTime && lastMemoryTime > baseTime) {
+    baseTime = lastMemoryTime;
+  } else {
+    const latestRunAt = await db.getLatestQueuedPostRunAt(channelId);
+    if (latestRunAt) {
+      const latestDbTime = new Date(latestRunAt).getTime();
+      if (latestDbTime > baseTime) {
+        baseTime = latestDbTime;
+      }
+    }
+  }
+
+  const runAtTime = baseTime + intervalMinutes * 60 * 1000;
+  channelLastQueuedTime.set(channelId, runAtTime);
+  return new Date(runAtTime);
+}
+
 function setupCustomBot(bot) {
+
   // Middleware to ensure only the bot owner can use it
   bot.use(async (ctx, next) => {
     if (ctx.chat && ctx.chat.type !== 'private') {
@@ -60,7 +86,7 @@ function setupCustomBot(bot) {
 
       return ctx.reply(
         `📝 Creating a new post for channel: *${channel.title}*\n\n` +
-        `Send me the *text message* or *photo* you want to post. You can include emojis and captions.`,
+        `Send me the *text message*, *photo*, *video*, *document*, or *forwarded post* you want to post.`,
         { parse_mode: 'Markdown' }
       );
     } else {
@@ -96,7 +122,7 @@ function setupCustomBot(bot) {
 
     await ctx.editMessageText(
       `📝 Creating a new post for channel: *${channel.title}*\n\n` +
-      `Send me the *text message* or *photo* you want to post. You can include emojis and captions.`,
+      `Send me the *text message*, *photo*, *video*, *document*, or *forwarded post* you want to post.`,
       { parse_mode: 'Markdown' }
     );
   });
@@ -110,12 +136,7 @@ function setupCustomBot(bot) {
     }
 
     await ctx.reply("👁️ *Preview of your post:*", { parse_mode: 'Markdown' });
-    
-    if (draft.media_type === 'photo') {
-      await ctx.replyWithPhoto(draft.file_id, { caption: draft.text || undefined });
-    } else {
-      await ctx.reply(draft.text);
-    }
+    await replyWithPreview(ctx, draft.media_type, draft.file_id, draft.text);
   });
 
   bot.action('send_post', async (ctx) => {
@@ -127,12 +148,7 @@ function setupCustomBot(bot) {
 
     try {
       await ctx.reply("📤 Sending post to channel...");
-      
-      if (draft.media_type === 'photo') {
-        await ctx.telegram.sendPhoto(draft.channel_id, draft.file_id, { caption: draft.text || undefined });
-      } else {
-        await ctx.telegram.sendMessage(draft.channel_id, draft.text);
-      }
+      await sendPostToChannel(ctx.telegram, draft.channel_id, draft.media_type, draft.file_id, draft.text);
       
       await ctx.reply("🎉 *Done!* Message successfully sent to the channel.", { parse_mode: 'Markdown' });
       
@@ -145,6 +161,7 @@ function setupCustomBot(bot) {
       await ctx.reply(`❌ *Failed to send message:* ${err.message}\n\nMake sure this bot is still an administrator in the channel and has posting rights.`);
     }
   });
+
 
   // Handle Delay Selection Menu
   bot.action('choose_delay', async (ctx) => {
@@ -198,9 +215,7 @@ function setupCustomBot(bot) {
       ]
     ]);
 
-    const description = draft.media_type === 'photo'
-      ? `📸 *Photo Draft saved!*${draft.text ? ` (Caption: ${draft.text.length} chars)` : ''}`
-      : `✍️ *Text Draft saved!* (${draft.text.length} chars)`;
+    const description = getMediaDescription(draft.media_type, draft.text, false);
 
     await ctx.editMessageText(
       `${description}\n\n` +
@@ -287,17 +302,7 @@ function setupCustomBot(bot) {
       const channel = await db.getChannel(draft.channel_id);
       const intervalMinutes = channel ? (channel.queue_interval || 1) : 1;
 
-      const latestRunAt = await db.getLatestQueuedPostRunAt(draft.channel_id);
-      
-      let baseTime = Date.now();
-      if (latestRunAt) {
-        const latestTime = new Date(latestRunAt).getTime();
-        if (latestTime > baseTime) {
-          baseTime = latestTime;
-        }
-      }
-
-      const runAt = new Date(baseTime + intervalMinutes * 60 * 1000);
+      const runAt = await calculateNextQueueRunAt(draft.channel_id, intervalMinutes);
 
       const post = await db.schedulePost(
         userId,
@@ -309,6 +314,7 @@ function setupCustomBot(bot) {
         runAt,
         true
       );
+
 
       // Enqueue into Redis BullMQ Queue
       await queueManager.addScheduledJob(post.id, post.run_at);
@@ -414,11 +420,12 @@ function setupCustomBot(bot) {
     );
   });
 
-  // Handle incoming message for draft (Accepts text and photos) - Registered last to avoid command clashes
+  // Handle incoming message for draft (Accepts text, photo, video, document, animation, audio, voice, forwarded messages)
   bot.on('message', async (ctx) => {
     const token = ctx.telegram.token;
     const sessionKey = `${ctx.from.id}:${token}`;
     const session = sessions.get(sessionKey);
+
 
     // Extract text/media from incoming message
     let text = null;
@@ -431,11 +438,31 @@ function setupCustomBot(bot) {
       fileId = photos[photos.length - 1].file_id;
       text = ctx.message.caption || null;
       mediaType = 'photo';
+    } else if (ctx.message.video) {
+      fileId = ctx.message.video.file_id;
+      text = ctx.message.caption || null;
+      mediaType = 'video';
+    } else if (ctx.message.document) {
+      fileId = ctx.message.document.file_id;
+      text = ctx.message.caption || null;
+      mediaType = 'document';
+    } else if (ctx.message.animation) {
+      fileId = ctx.message.animation.file_id;
+      text = ctx.message.caption || null;
+      mediaType = 'animation';
+    } else if (ctx.message.audio) {
+      fileId = ctx.message.audio.file_id;
+      text = ctx.message.caption || null;
+      mediaType = 'audio';
+    } else if (ctx.message.voice) {
+      fileId = ctx.message.voice.file_id;
+      text = ctx.message.caption || null;
+      mediaType = 'voice';
     } else if (ctx.message.text) {
       text = ctx.message.text;
       mediaType = 'text';
     } else {
-      return ctx.reply("⚠️ Sorry, this bot only supports text and photo posts. Please send a text or a photo.");
+      return ctx.reply("⚠️ Unsupported message format. Please send a text, photo, video, document, GIF, or audio file.");
     }
 
     const channels = await db.getChannelsByBot(token);
@@ -443,17 +470,16 @@ function setupCustomBot(bot) {
       return ctx.reply("👋 Welcome! Please connect a channel using the main Controller Bot first.");
     }
 
-    // Check if the message is a forwarded message
-    const isForwarded = ctx.message.forward_date || ctx.message.forward_from_chat || ctx.message.forward_from;
+    // Detect if the message is forwarded
+    const isForwarded = !!(ctx.message.forward_origin || ctx.message.forward_date || ctx.message.forward_from_chat || ctx.message.forward_from);
 
     if (isForwarded) {
-      // Auto-queue immediately!
+      // Auto-queue forwarded posts sequentially using channel queue interval
       let targetChannel = channels[0];
       
-      // If multiple channels, try to see if there is an active channel in session or draft
       if (channels.length > 1) {
         const existingDraft = await db.getDraft(ctx.from.id);
-        if (existingDraft) {
+        if (existingDraft && existingDraft.channel_id) {
           const matchCh = channels.find(c => String(c.channel_id) === String(existingDraft.channel_id));
           if (matchCh) {
             targetChannel = matchCh;
@@ -463,17 +489,7 @@ function setupCustomBot(bot) {
 
       try {
         const intervalMinutes = targetChannel.queue_interval || 1;
-        const latestRunAt = await db.getLatestQueuedPostRunAt(targetChannel.channel_id);
-        
-        let baseTime = Date.now();
-        if (latestRunAt) {
-          const latestTime = new Date(latestRunAt).getTime();
-          if (latestTime > baseTime) {
-            baseTime = latestTime;
-          }
-        }
-
-        const runAt = new Date(baseTime + intervalMinutes * 60 * 1000);
+        const runAt = await calculateNextQueueRunAt(targetChannel.channel_id, intervalMinutes);
 
         const post = await db.schedulePost(
           ctx.from.id,
@@ -493,8 +509,9 @@ function setupCustomBot(bot) {
         const dateString = runAt.toLocaleDateString('en-US', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' });
 
         return ctx.reply(
-          `📥 *Forwarded message auto-queued!*\n` +
+          `📥 *Forwarded post auto-queued!*\n` +
           `• Channel: *${targetChannel.title}*\n` +
+          `• Interval: *${formatInterval(intervalMinutes)}*\n` +
           `• Scheduled send: *${dateString} at ${timeString}*`,
           { parse_mode: 'Markdown' }
         );
@@ -504,7 +521,6 @@ function setupCustomBot(bot) {
       }
     }
 
-    // Regular (non-forwarded) message: auto-detect as draft!
     let targetChannelId = null;
 
     if (session && session.step === 'waiting_for_text') {
@@ -514,7 +530,7 @@ function setupCustomBot(bot) {
     }
 
     if (targetChannelId) {
-      // Save draft and show send options directly
+      // Save draft and present interactive options directly
       await db.saveDraft(ctx.from.id, token, targetChannelId, text, mediaType, fileId);
 
       // Clean up session if it was waiting_for_text
@@ -534,20 +550,18 @@ function setupCustomBot(bot) {
         ]
       ]);
 
-      const description = mediaType === 'photo'
-        ? `📸 *Photo Draft saved!*${text ? ` (Caption: ${text.length} chars)` : ''}`
-        : `✍️ *Text Draft saved!* (${text.length} chars)`;
-
+      const description = getMediaDescription(mediaType, text, isForwarded);
       const channel = channels.find(c => String(c.channel_id) === String(targetChannelId));
       const channelTitle = channel ? channel.title : 'Channel';
 
       return ctx.reply(
-        `✍️ *Draft created for ${channelTitle}*\n\n` +
-        `Click *Preview* to see it, *Send Now* to post immediately, *Add to Queue* to queue it, or *Cancel* to discard.`,
+        `${description}\n` +
+        `📣 Channel: *${channelTitle}*\n\n` +
+        `Click *Preview* to see it, *Send Now* to post immediately, *Add to Queue* to queue it, *Send with Delay* to schedule, or *Cancel* to discard.`,
         { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
       );
     } else {
-      // Multiple channels and no target channel selected yet: save with channel_id = 0
+      // Multiple channels: save draft with channel_id = 0 and let user select channel
       await db.saveDraft(ctx.from.id, token, 0, text, mediaType, fileId);
 
       const buttons = channels.map(ch => 
@@ -555,13 +569,16 @@ function setupCustomBot(bot) {
       );
       const keyboard = Markup.inlineKeyboard(buttons, { columns: 1 });
 
+      const description = getMediaDescription(mediaType, text, isForwarded);
+
       return ctx.reply(
-        `📝 *Post Draft saved!*\n\n` +
+        `${description}\n\n` +
         `Please choose the target channel for your post:`,
         { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
       );
     }
   });
+
 }
 
 async function showChannelQueue(ctx, channelId, editMessage = false) {
@@ -593,9 +610,10 @@ async function showChannelQueue(ctx, channelId, editMessage = false) {
     if (post.text) {
       contentSnippet = post.text.replace(/\n/g, ' ').substring(0, 30);
       if (post.text.length > 30) contentSnippet += '...';
-    } else if (post.media_type === 'photo') {
-      contentSnippet = '[Photo]';
+    } else if (post.media_type) {
+      contentSnippet = `[${post.media_type.toUpperCase()}]`;
     }
+
 
     text += `*#${index + 1}* • ${dateString} at ${timeString}\n`;
     text += `   📝 \`${contentSnippet}\`\n\n`;
