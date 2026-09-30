@@ -80,7 +80,8 @@ async function initDb() {
     // Drafts table for active post creation flows
     await client.query(`
       CREATE TABLE IF NOT EXISTS drafts (
-        user_id BIGINT PRIMARY KEY,
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL,
         bot_token TEXT NOT NULL REFERENCES bots(token) ON DELETE CASCADE,
         channel_id BIGINT NOT NULL,
         text TEXT,
@@ -106,12 +107,15 @@ async function initDb() {
 
     // Run safe migrations in case the database already exists
     await client.query(`
+      ALTER TABLE drafts DROP CONSTRAINT IF EXISTS drafts_pkey;
+      ALTER TABLE drafts ADD COLUMN IF NOT EXISTS id SERIAL;
       ALTER TABLE drafts ADD COLUMN IF NOT EXISTS media_type VARCHAR(50) DEFAULT 'text';
       ALTER TABLE drafts ADD COLUMN IF NOT EXISTS file_id TEXT;
       ALTER TABLE drafts ALTER COLUMN text DROP NOT NULL;
       ALTER TABLE channels ADD COLUMN IF NOT EXISTS queue_interval INTEGER DEFAULT 1;
       ALTER TABLE scheduled_posts ADD COLUMN IF NOT EXISTS is_queue BOOLEAN DEFAULT FALSE;
     `);
+
 
     await client.query('COMMIT');
     console.log('✅ PostgreSQL Database schema checked & initialized successfully.');
@@ -226,23 +230,30 @@ async function saveDraft(userId, botToken, channelId, text, mediaType = 'text', 
   const res = await pool.query(
     `INSERT INTO drafts (user_id, bot_token, channel_id, text, media_type, file_id)
      VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (user_id) DO UPDATE
-     SET bot_token = EXCLUDED.bot_token, channel_id = EXCLUDED.channel_id, text = EXCLUDED.text, media_type = EXCLUDED.media_type, file_id = EXCLUDED.file_id
      RETURNING *`,
     [userId, botToken, channelId, text, mediaType, fileId]
   );
   return res.rows[0];
 }
 
-async function getDraft(userId) {
-  const res = await pool.query('SELECT * FROM drafts WHERE user_id = $1', [userId]);
-  return res.rows[0] || null;
+async function getDraft(draftIdOrUserId) {
+  if (typeof draftIdOrUserId === 'number' || (typeof draftIdOrUserId === 'string' && /^\d+$/.test(draftIdOrUserId))) {
+    const resId = await pool.query('SELECT * FROM drafts WHERE id = $1', [parseInt(draftIdOrUserId, 10)]);
+    if (resId.rows.length > 0) return resId.rows[0];
+  }
+  const resUser = await pool.query('SELECT * FROM drafts WHERE user_id = $1 ORDER BY id DESC LIMIT 1', [draftIdOrUserId]);
+  return resUser.rows[0] || null;
 }
 
-async function clearDraft(userId) {
-  const res = await pool.query('DELETE FROM drafts WHERE user_id = $1 RETURNING *', [userId]);
-  return res.rows[0] || null;
+async function clearDraft(draftIdOrUserId) {
+  if (typeof draftIdOrUserId === 'number' || (typeof draftIdOrUserId === 'string' && /^\d+$/.test(draftIdOrUserId))) {
+    const resId = await pool.query('DELETE FROM drafts WHERE id = $1 RETURNING *', [parseInt(draftIdOrUserId, 10)]);
+    if (resId.rows.length > 0) return resId.rows[0];
+  }
+  const resUser = await pool.query('DELETE FROM drafts WHERE user_id = $1 RETURNING *', [draftIdOrUserId]);
+  return resUser.rows[0] || null;
 }
+
 
 // --- SCHEDULED POSTS OPERATIONS ---
 

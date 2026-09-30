@@ -127,94 +127,99 @@ function setupCustomBot(bot) {
     );
   });
 
-  // Handle Action Buttons (Preview, Send, Cancel)
-  bot.action('preview_post', async (ctx) => {
+  function getDraftKeyboard(draftId) {
+    return Markup.inlineKeyboard([
+      [Markup.button.callback('👁️ Preview', `preview_post:${draftId}`)],
+      [
+        Markup.button.callback('📤 Send Now', `send_post:${draftId}`),
+        Markup.button.callback('📥 Add to Queue', `add_to_queue:${draftId}`)
+      ],
+      [
+        Markup.button.callback('🕒 Send with Delay', `choose_delay:${draftId}`),
+        Markup.button.callback('❌ Cancel', `cancel_post:${draftId}`)
+      ]
+    ]);
+  }
+
+  // Handle Action Buttons (Preview, Send, Cancel, Queue)
+  bot.action(/^(?:preview_post|preview_post:(.+))$/, async (ctx) => {
     await ctx.answerCbQuery();
-    const draft = await db.getDraft(ctx.from.id);
+    const draftId = ctx.match[1] || ctx.from.id;
+    const draft = await db.getDraft(draftId);
     if (!draft) {
-      return ctx.reply("❌ No active draft found. Send /newpost to start a new post.");
+      return ctx.reply("❌ No active draft found or already processed.");
     }
 
     await ctx.reply("👁️ *Preview of your post:*", { parse_mode: 'Markdown' });
     await replyWithPreview(ctx, draft.media_type, draft.file_id, draft.text);
   });
 
-  bot.action('send_post', async (ctx) => {
+  bot.action(/^(?:send_post|send_post:(.+))$/, async (ctx) => {
     await ctx.answerCbQuery();
-    const draft = await db.getDraft(ctx.from.id);
+    const draftId = ctx.match[1] || ctx.from.id;
+    const draft = await db.getDraft(draftId);
     if (!draft) {
-      return ctx.reply("❌ No active draft found. Send /newpost to start.");
+      return ctx.reply("❌ No active draft found or already processed.");
     }
 
     try {
-      await ctx.reply("📤 Sending post to channel...");
+      await ctx.reply("📤 Sending post to destination...");
       await sendPostToChannel(ctx.telegram, draft.channel_id, draft.media_type, draft.file_id, draft.text);
       
-      await ctx.reply("🎉 *Done!* Message successfully sent to the channel.", { parse_mode: 'Markdown' });
+      await ctx.reply("🎉 *Done!* Message successfully sent to destination.", { parse_mode: 'Markdown' });
       
-      // Clean up
-      await db.clearDraft(ctx.from.id);
+      await db.clearDraft(draft.id);
       const sessionKey = `${ctx.from.id}:${ctx.telegram.token}`;
       sessions.delete(sessionKey);
     } catch (err) {
-      console.error('Error sending message to channel:', err);
-      await ctx.reply(`❌ *Failed to send message:* ${err.message}\n\nMake sure this bot is still an administrator in the channel and has posting rights.`);
+      console.error('Error sending message:', err);
+      await ctx.reply(`❌ *Failed to send message:* ${err.message}\n\nMake sure this bot is an administrator in the destination with posting rights.`);
     }
   });
 
-
   // Handle Delay Selection Menu
-  bot.action('choose_delay', async (ctx) => {
+  bot.action(/^(?:choose_delay|choose_delay:(.+))$/, async (ctx) => {
     await ctx.answerCbQuery();
-    const draft = await db.getDraft(ctx.from.id);
+    const draftId = ctx.match[1] || ctx.from.id;
+    const draft = await db.getDraft(draftId);
     if (!draft) {
       return ctx.reply("❌ No active draft found.");
     }
 
     const keyboard = Markup.inlineKeyboard([
       [
-        Markup.button.callback('⏱️ 5 Mins', 'schedule:5'),
-        Markup.button.callback('⏱️ 15 Mins', 'schedule:15'),
-        Markup.button.callback('⏱️ 30 Mins', 'schedule:30')
+        Markup.button.callback('⏱️ 5 Mins', `schedule:${draft.id}:5`),
+        Markup.button.callback('⏱️ 15 Mins', `schedule:${draft.id}:15`),
+        Markup.button.callback('⏱️ 30 Mins', `schedule:${draft.id}:30`)
       ],
       [
-        Markup.button.callback('⏱️ 1 Hour', 'schedule:60'),
-        Markup.button.callback('⏱️ 2 Hours', 'schedule:120'),
-        Markup.button.callback('⏱️ 6 Hours', 'schedule:360')
+        Markup.button.callback('⏱️ 1 Hour', `schedule:${draft.id}:60`),
+        Markup.button.callback('⏱️ 2 Hours', `schedule:${draft.id}:120`),
+        Markup.button.callback('⏱️ 6 Hours', `schedule:${draft.id}:360`)
       ],
       [
-        Markup.button.callback('⏱️ 12 Hours', 'schedule:720'),
-        Markup.button.callback('⏱️ 24 Hours', 'schedule:1440')
+        Markup.button.callback('⏱️ 12 Hours', `schedule:${draft.id}:720`),
+        Markup.button.callback('⏱️ 24 Hours', `schedule:${draft.id}:1440`)
       ],
-      [Markup.button.callback('↩️ Back to Draft', 'back_to_draft')]
+      [Markup.button.callback('↩️ Back to Draft', `back_to_draft:${draft.id}`)]
     ]);
 
     await ctx.editMessageText(
-      "🕒 *Choose a delay interval before sending to channel:*",
+      "🕒 *Choose a delay interval before sending:*",
       { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
     );
   });
 
   // Handle Go Back to Draft Options
-  bot.action('back_to_draft', async (ctx) => {
+  bot.action(/^(?:back_to_draft|back_to_draft:(.+))$/, async (ctx) => {
     await ctx.answerCbQuery();
-    const draft = await db.getDraft(ctx.from.id);
+    const draftId = ctx.match[1] || ctx.from.id;
+    const draft = await db.getDraft(draftId);
     if (!draft) {
       return ctx.reply("❌ No active draft found.");
     }
 
-    const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback('👁️ Preview', 'preview_post')],
-      [
-        Markup.button.callback('📤 Send Now', 'send_post'),
-        Markup.button.callback('📥 Add to Queue', 'add_to_queue')
-      ],
-      [
-        Markup.button.callback('🕒 Send with Delay', 'choose_delay'),
-        Markup.button.callback('❌ Cancel', 'cancel_post')
-      ]
-    ]);
-
+    const keyboard = getDraftKeyboard(draft.id);
     const description = getMediaDescription(draft.media_type, draft.text, false);
 
     await ctx.editMessageText(
@@ -225,21 +230,21 @@ function setupCustomBot(bot) {
   });
 
   // Handle Schedule execution
-  bot.action(/^schedule:(\d+)$/, async (ctx) => {
+  bot.action(/^schedule:(?:(\d+):)?(\d+)$/, async (ctx) => {
     await ctx.answerCbQuery();
-    const minutes = parseInt(ctx.match[1], 10);
+    const draftId = ctx.match[1] || ctx.from.id;
+    const minutes = parseInt(ctx.match[2], 10);
     const userId = ctx.from.id;
     const token = ctx.telegram.token;
 
-    const draft = await db.getDraft(userId);
+    const draft = await db.getDraft(draftId);
     if (!draft) {
-      return ctx.reply("❌ No active draft found.");
+      return ctx.reply("❌ No active draft found or already processed.");
     }
 
     try {
       const runAt = new Date(Date.now() + minutes * 60 * 1000);
 
-      // Save to scheduled posts table
       const post = await db.schedulePost(
         userId,
         token,
@@ -250,13 +255,9 @@ function setupCustomBot(bot) {
         runAt
       );
 
-      // Enqueue into Redis BullMQ Queue
       await queueManager.addScheduledJob(post.id, post.run_at);
+      await db.clearDraft(draft.id);
 
-      // Clear active draft
-      await db.clearDraft(userId);
-
-      // Reset user session
       const sessionKey = `${userId}:${token}`;
       sessions.delete(sessionKey);
 
@@ -265,7 +266,7 @@ function setupCustomBot(bot) {
 
       await ctx.editMessageText(
         `🕒 *Post successfully scheduled!*\n\n` +
-        `It will be sent to the channel in *${minutes} minutes* (on ${dateString} at ${timeString}).`,
+        `It will be sent to destination in *${minutes} minutes* (on ${dateString} at ${timeString}).`,
         { parse_mode: 'Markdown' }
       );
     } catch (err) {
@@ -274,9 +275,10 @@ function setupCustomBot(bot) {
     }
   });
 
-  bot.action('cancel_post', async (ctx) => {
+  bot.action(/^(?:cancel_post|cancel_post:(.+))$/, async (ctx) => {
     await ctx.answerCbQuery();
-    await db.clearDraft(ctx.from.id);
+    const draftId = ctx.match[1] || ctx.from.id;
+    await db.clearDraft(draftId);
     
     const sessionKey = `${ctx.from.id}:${ctx.telegram.token}`;
     sessions.delete(sessionKey);
@@ -284,14 +286,13 @@ function setupCustomBot(bot) {
     await ctx.reply("❌ Post creation cancelled. Draft discarded.");
   });
 
-
-
   // Handle Add to Queue execution
-  bot.action('add_to_queue', async (ctx) => {
+  bot.action(/^(?:add_to_queue|add_to_queue:(.+))$/, async (ctx) => {
+    const draftId = ctx.match[1] || ctx.from.id;
     const userId = ctx.from.id;
     const token = ctx.telegram.token;
 
-    const draft = await db.getDraft(userId);
+    const draft = await db.getDraft(draftId);
     if (!draft) {
       return ctx.answerCbQuery("❌ No active draft found or already processed!", { show_alert: true }).catch(() => {});
     }
@@ -315,11 +316,8 @@ function setupCustomBot(bot) {
         true
       );
 
-
-      // Enqueue into Redis BullMQ Queue
       await queueManager.addScheduledJob(post.id, post.run_at);
-
-      await db.clearDraft(userId);
+      await db.clearDraft(draft.id);
 
       const sessionKey = `${userId}:${token}`;
       sessions.delete(sessionKey);
@@ -338,6 +336,7 @@ function setupCustomBot(bot) {
       await ctx.reply(`❌ Failed to add post to queue: ${err.message}`);
     }
   });
+
 
   // Handle Queue viewing and management
   bot.command('queue', async (ctx) => {
@@ -530,37 +529,28 @@ function setupCustomBot(bot) {
     }
 
     if (targetChannelId) {
-      // Save draft and present interactive options directly
-      await db.saveDraft(ctx.from.id, token, targetChannelId, text, mediaType, fileId);
+      // Save draft and present interactive options directly with unique draft ID
+      const draft = await db.saveDraft(ctx.from.id, token, targetChannelId, text, mediaType, fileId);
 
       // Clean up session if it was waiting_for_text
       if (session && session.step === 'waiting_for_text') {
         sessions.delete(sessionKey);
       }
 
-      const keyboard = Markup.inlineKeyboard([
-        [Markup.button.callback('👁️ Preview', 'preview_post')],
-        [
-          Markup.button.callback('📤 Send Now', 'send_post'),
-          Markup.button.callback('📥 Add to Queue', 'add_to_queue')
-        ],
-        [
-          Markup.button.callback('🕒 Send with Delay', 'choose_delay'),
-          Markup.button.callback('❌ Cancel', 'cancel_post')
-        ]
-      ]);
+      const keyboard = getDraftKeyboard(draft.id);
 
       const description = getMediaDescription(mediaType, text, isForwarded);
       const channel = channels.find(c => String(c.channel_id) === String(targetChannelId));
-      const channelTitle = channel ? channel.title : 'Channel';
+      const channelTitle = channel ? channel.title : 'Destination';
 
       return ctx.reply(
         `${description}\n` +
-        `📣 Channel: *${channelTitle}*\n\n` +
+        `📣 Destination: *${channelTitle}*\n\n` +
         `Click *Preview* to see it, *Send Now* to post immediately, *Add to Queue* to queue it, *Send with Delay* to schedule, or *Cancel* to discard.`,
         { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
       );
-    } else {
+    }
+ else {
       // Multiple channels: save draft with channel_id = 0 and let user select channel
       await db.saveDraft(ctx.from.id, token, 0, text, mediaType, fileId);
 
