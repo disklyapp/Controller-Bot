@@ -31,6 +31,7 @@ async function startBot(token) {
     bot.telegram.setMyCommands([
       { command: 'newpost', description: 'Create a new post draft' },
       { command: 'queue', description: 'View active scheduled posts queue' },
+      { command: 'clearqueue', description: 'Clear/Delete all queued posts' },
       { command: 'cancel', description: 'Cancel current post draft' }
     ]).catch(err => console.error(`Failed to set commands for bot @${botInfo.username}:`, err.message));
 

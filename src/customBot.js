@@ -404,6 +404,33 @@ function setupCustomBot(bot) {
     }
   });
 
+  // Clear all queued posts command
+  bot.command('clearqueue', async (ctx) => {
+    const token = ctx.telegram.token;
+    const userId = ctx.from.id;
+    console.log(`🧹 [Custom Bot] User ${userId} ran /clearqueue command`);
+
+    const channels = await db.getChannelsByBot(token);
+    if (channels.length === 0) {
+      return ctx.reply("❌ No channels connected to this bot.");
+    }
+
+    let totalDeleted = 0;
+    for (const channel of channels) {
+      const posts = await db.getScheduledPostsForChannel(channel.channel_id);
+      const queuedPosts = posts.filter(p => p.is_queue);
+
+      for (const post of queuedPosts) {
+        await db.deleteScheduledPost(post.id);
+        await queueManager.removeScheduledJob(post.id);
+        totalDeleted++;
+      }
+      channelLastQueuedTime.delete(channel.channel_id);
+    }
+
+    return ctx.reply(`🧹 *Queue Purged!*\nSuccessfully deleted *${totalDeleted}* queued post(s).`, { parse_mode: 'Markdown' });
+  });
+
   bot.action(/^view_queue_ch:(.+)$/, async (ctx) => {
     await ctx.answerCbQuery();
     const channelId = ctx.match[1];
