@@ -345,32 +345,34 @@ function setupControllerBot(bot) {
       return;
     }
 
-    // STEP 2: Waiting for channel username/ID or forwarded message
+    // STEP 2: Waiting for channel/group username/ID or forwarded message
     if (user.step === 'waiting_for_channel') {
       let targetChatId = null;
       let directText = ctx.message.text ? ctx.message.text.trim() : null;
 
-      // Check if message is forwarded from a channel
-      if (ctx.message.forward_from_chat && ctx.message.forward_from_chat.type === 'channel') {
+      // Check if message is forwarded from a channel, supergroup, or group
+      if (ctx.message.forward_from_chat) {
         targetChatId = ctx.message.forward_from_chat.id;
+      } else if (ctx.message.forward_origin && ctx.message.forward_origin.chat) {
+        targetChatId = ctx.message.forward_origin.chat.id;
       } else if (directText) {
         // Check if user sent an invite link
         if (directText.includes('t.me/') || directText.startsWith('+') || directText.startsWith('https://')) {
           return ctx.reply(
-            `⚠️ *Invite links cannot be used directly to connect channels.*\n\n` +
-            `👉 *How to connect your channel:*\n` +
-            `1. Open your Telegram channel.\n` +
-            `2. *Forward any message* from that channel into this chat.\n\n` +
-            `OR if it is a public channel, send its \`@username\` (e.g. \`@mychannel\`).`,
+            `⚠️ *Invite links cannot be used directly to connect channels or groups.*\n\n` +
+            `👉 *How to connect your channel or group:*\n` +
+            `1. Open your Telegram channel or group.\n` +
+            `2. *Forward any message* from that channel/group into this chat.\n\n` +
+            `OR if it is a public channel/group, send its \`@username\` (e.g. \`@mychannel\`) or numeric ID (e.g. \`-1001234567890\`).`,
             { parse_mode: 'Markdown' }
           );
         }
-        // Support both @channel and numeric ID
+        // Support both @username and numeric ID
         targetChatId = directText;
       }
 
       if (!targetChatId) {
-        return ctx.reply('⚠️ Please forward a message from your channel or type its username (starting with @) or ID.');
+        return ctx.reply('⚠️ Please forward a message from your channel or group, or type its username (starting with @) or numeric ID.');
       }
 
       const botToken = user.temp_token;
@@ -379,7 +381,7 @@ function setupControllerBot(bot) {
         return ctx.reply('❌ Active session lost. Please run /addchannel again.');
       }
 
-      const statusMsg = await ctx.reply('🔍 Connecting to channel, please wait...');
+      const statusMsg = await ctx.reply('🔍 Connecting to destination, please wait...');
 
       try {
         const customBot = new Telegraf(botToken);
@@ -387,12 +389,13 @@ function setupControllerBot(bot) {
         // Fetch chat information via custom bot
         const chat = await customBot.telegram.getChat(targetChatId);
 
-        if (chat.type !== 'channel') {
+        const validTypes = ['channel', 'supergroup', 'group'];
+        if (!validTypes.includes(chat.type)) {
           await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-          return ctx.reply('❌ That is not a channel. You can only connect channels. Please forward a message from your channel or send a channel username.');
+          return ctx.reply('❌ Invalid destination. You can only connect Channels, Supergroups (new groups), or Basic Groups.');
         }
 
-        // Verify if custom bot is administrator in the channel
+        // Verify if custom bot is administrator in the channel/group
         const admins = await customBot.telegram.getChatAdministrators(chat.id);
         const botMe = await customBot.telegram.getMe();
         
@@ -400,13 +403,21 @@ function setupControllerBot(bot) {
 
         if (!isBotAdmin) {
           await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-          return ctx.reply(`❌ The bot @${botMe.username} is not an administrator in that channel. Please add @${botMe.username} as an Administrator in your channel with Post Messages permission first.`);
+          return ctx.reply(
+            `❌ *Bot is not an Administrator!*\n\n` +
+            `The bot @${botMe.username} was found in *${chat.title}*, but it is not an **Administrator**.\n\n` +
+            `👉 *To fix this:*\n` +
+            `1. Open *${chat.title}* settings.\n` +
+            `2. Add @${botMe.username} as an **Administrator** with **Post Messages** (or Send Messages) permission.\n` +
+            `3. Try connecting again!`,
+            { parse_mode: 'Markdown' }
+          );
         }
 
-        // Add channel connection
+        // Add channel/group connection
         await db.addChannel(
           chat.id,
-          chat.title || chat.username || 'Untitled Channel',
+          chat.title || chat.username || 'Untitled Destination',
           chat.username || null,
           botToken,
           userId
@@ -421,34 +432,48 @@ function setupControllerBot(bot) {
         const buttons = keyboard.reply_markup.inline_keyboard;
         buttons.push([Markup.button.callback('⏭️ Skip / Use Default (1 Min)', `skipinitint:${chat.id}`)]);
 
+        const chatTypeName = chat.type === 'channel' ? 'Channel' : chat.type === 'supergroup' ? 'Supergroup (New Group)' : 'Group';
+
         await ctx.reply(
-          `🎉 *Channel connected:* *${chat.title}*\n\n` +
-          `Now, please select the *Queue Interval Time* for this channel. ` +
+          `🎉 *${chatTypeName} Connected successfully!*\n\n` +
+          `📣 Title: *${chat.title}*\n` +
+          `🆔 ID: \`${chat.id}\`\n\n` +
+          `Now, please select the *Queue Interval Time* for this ${chatTypeName.toLowerCase()}. ` +
           `This determines the time delay between sequential queued posts.`,
           { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } }
         );
       } catch (err) {
         await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
         
-        if (err.message && err.message.includes('chat not found')) {
+        const errMsg = err.message || '';
+        if (errMsg.includes('chat not found')) {
           await ctx.reply(
-            `❌ *Channel Not Found*\n\n` +
-            `👉 *To fix this:*\n` +
-            `• For **Private Channels**: Please **FORWARD ANY MESSAGE** from your channel into this chat.\n` +
-            `• For **Public Channels**: Type the username starting with \`@\` (e.g. \`@mychannel\`).\n` +
-            `• Make sure your custom bot has been added as an **Administrator** in the channel first!`,
+            `❌ *Destination Not Found*\n\n` +
+            `👉 *How to fix this:*\n` +
+            `• **For Private Channels/Groups**: Please **FORWARD ANY MESSAGE** from your channel or group into this chat.\n` +
+            `• **For Public Channels/Groups**: Type the username starting with \`@\` (e.g. \`@mychannel\`) or ID (e.g. \`-1001234567890\`).\n` +
+            `• Make sure your custom bot has been added as an **Administrator** in the channel/group first!`,
+            { parse_mode: 'Markdown' }
+          );
+        } else if (errMsg.includes('bot is not a member') || errMsg.includes('not an administrator') || errMsg.includes('member of the chat')) {
+          await ctx.reply(
+            `❌ *Bot Permission Error*\n\n` +
+            `Your custom bot is not a member or administrator in that channel/group.\n\n` +
+            `👉 Please add your custom bot to the channel/group as an **Administrator** with **Post/Send Messages** permission, then try again!`,
             { parse_mode: 'Markdown' }
           );
         } else {
           await ctx.reply(
-            `❌ *Connection failed:* ${err.message}\n\n` +
-            `Please make sure your custom bot is an Administrator in the channel with Post Messages permission, then try again or send /cancel.`,
+            `❌ *Connection Failed*\n\n` +
+            `*Error Details:* \`${errMsg}\`\n\n` +
+            `Please check that your custom bot is an Administrator in the channel or group with message permissions, then try again or send /cancel to abort.`,
             { parse_mode: 'Markdown' }
           );
         }
       }
       return;
     }
+
 
 
     // STEP 3: Waiting for queue interval selection
