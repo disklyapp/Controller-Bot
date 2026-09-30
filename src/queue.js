@@ -142,12 +142,13 @@ function initQueueWorker(getRunningBotFn) {
 
         console.log(`✅ [Redis Queue Worker] Post ID ${post.id} successfully sent.`);
       } catch (sendErr) {
-        console.error(`❌ [Redis Queue Worker] Error sending post ID ${post.id}:`, sendErr.message);
+        console.error(`❌ [Redis Queue Worker Error] Failed to send post ID ${post.id} (Destination: ${post.channel_id}, Media: ${post.media_type}):`, sendErr.message || sendErr);
+        if (sendErr.stack) console.error(sendErr.stack);
 
         // Notify user of failure
         await bot.telegram.sendMessage(
           post.user_id,
-          `❌ *Scheduled Post Failed!*\nYour scheduled post failed to send: ${sendErr.message}`,
+          `❌ *Scheduled Post Failed!*\n• Destination ID: \`${post.channel_id}\`\n• Reason: ${sendErr.message}`,
           { parse_mode: 'Markdown' }
         ).catch(() => {});
       } finally {
@@ -159,8 +160,10 @@ function initQueueWorker(getRunningBotFn) {
   );
 
   postWorker.on('failed', (job, err) => {
-    console.error(`❌ [Redis Queue Worker] Job ${job?.id} failed:`, err.message);
+    console.error(`❌ [Redis Queue Worker Job Failed] Job ID ${job?.id} failed:`, err.message || err);
+    if (err?.stack) console.error(err.stack);
   });
+
 
   console.log('✅ [Redis Queue Worker] Scheduler worker started successfully.');
 }

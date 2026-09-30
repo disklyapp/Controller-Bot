@@ -1,23 +1,72 @@
+const db = require('./db');
+
 /**
- * Send post to Telegram Channel based on media type
+ * Helper to log and format Telegram API errors clearly for console/Railway logs
+ */
+function logTelegramError(contextTitle, err, targetId) {
+  const code = err?.response?.error_code || err?.code || 'UNKNOWN';
+  const description = err?.response?.description || err?.message || String(err);
+
+  console.error(`❌ [${contextTitle}] Telegram API Error (Target: ${targetId}):`);
+  console.error(`   • Error Code: ${code}`);
+  console.error(`   • Description: ${description}`);
+
+  if (description.includes('bot was kicked') || description.includes('not a member') || description.includes('Forbidden')) {
+    console.error(`   💡 Diagnosis: Bot was kicked or is not a member of ${targetId}. Add the bot back as an Administrator with full posting permissions.`);
+  } else if (description.includes('chat not found')) {
+    console.error(`   💡 Diagnosis: Destination ${targetId} not found. Verify the bot is added to the channel/group.`);
+  } else if (description.includes('need administrator rights') || description.includes('not an administrator')) {
+    console.error(`   💡 Diagnosis: Admin permissions required in ${targetId}. Grant 'Post Messages' rights to the bot.`);
+  } else if (description.includes('caption is too long')) {
+    console.error(`   💡 Diagnosis: Media caption exceeds Telegram's 1024-character limit.`);
+  }
+}
+
+/**
+ * Send post to Telegram Channel/Group/Supergroup based on media type, handling chat migration
  */
 async function sendPostToChannel(telegram, channelId, mediaType, fileId, text) {
   const options = { caption: text || undefined };
-  switch (mediaType) {
-    case 'photo':
-      return await telegram.sendPhoto(channelId, fileId, options);
-    case 'video':
-      return await telegram.sendVideo(channelId, fileId, options);
-    case 'document':
-      return await telegram.sendDocument(channelId, fileId, options);
-    case 'animation':
-      return await telegram.sendAnimation(channelId, fileId, options);
-    case 'audio':
-      return await telegram.sendAudio(channelId, fileId, options);
-    case 'voice':
-      return await telegram.sendVoice(channelId, fileId, options);
-    default:
-      return await telegram.sendMessage(channelId, text || '');
+
+  const dispatch = async (id) => {
+    switch (mediaType) {
+      case 'photo':
+        return await telegram.sendPhoto(id, fileId, options);
+      case 'video':
+        return await telegram.sendVideo(id, fileId, options);
+      case 'document':
+        return await telegram.sendDocument(id, fileId, options);
+      case 'animation':
+        return await telegram.sendAnimation(id, fileId, options);
+      case 'audio':
+        return await telegram.sendAudio(id, fileId, options);
+      case 'voice':
+        return await telegram.sendVoice(id, fileId, options);
+      default:
+        return await telegram.sendMessage(id, text || '');
+    }
+  };
+
+  try {
+    return await dispatch(channelId);
+  } catch (err) {
+    // Handle supergroup migration error (migrate_to_chat_id)
+    const newChatId = err?.response?.parameters?.migrate_to_chat_id;
+    if (newChatId) {
+      console.log(`🔄 [Telegram Migration] Group ${channelId} was upgraded to Supergroup ${newChatId}. Updating database records...`);
+      try {
+        await db.pool.query('UPDATE channels SET channel_id = $1 WHERE channel_id = $2', [String(newChatId), String(channelId)]);
+        await db.pool.query('UPDATE drafts SET channel_id = $1 WHERE channel_id = $2', [String(newChatId), String(channelId)]);
+        await db.pool.query('UPDATE scheduled_posts SET channel_id = $1 WHERE channel_id = $2', [String(newChatId), String(channelId)]);
+        console.log(`✅ [Telegram Migration] Database updated successfully to new supergroup ID ${newChatId}. Retrying post send...`);
+        return await dispatch(newChatId);
+      } catch (dbErr) {
+        console.error('❌ Failed to update channel ID on migration:', dbErr);
+      }
+    }
+
+    logTelegramError('Post Dispatcher', err, channelId);
+    throw err;
   }
 }
 
@@ -73,5 +122,7 @@ function getMediaDescription(mediaType, text, isForwarded = false) {
 module.exports = {
   sendPostToChannel,
   replyWithPreview,
-  getMediaDescription
+  getMediaDescription,
+  logTelegramError
 };
+

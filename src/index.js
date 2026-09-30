@@ -93,7 +93,16 @@ async function main() {
   process.once('SIGTERM', () => shutdown('SIGTERM'));
 }
 
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('⚠️ [System Error] Unhandled Promise Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('💥 [System Error] Uncaught Exception:', err.stack || err.message || err);
+});
+
 main().catch(err => {
   console.error('Unhandled system error on startup:', err);
   process.exit(1);
 });
+
