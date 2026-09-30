@@ -48,6 +48,7 @@ function setupControllerBot(bot) {
   // /start command
   bot.command('start', async (ctx) => {
     const userId = ctx.from.id;
+    console.log(`🤖 [Main Controller Bot] User ${userId} ran /start`);
     await db.updateUserStep(userId, 'idle', null);
 
     await ctx.reply(
@@ -64,6 +65,7 @@ function setupControllerBot(bot) {
   // /cancel command
   bot.command('cancel', async (ctx) => {
     const userId = ctx.from.id;
+    console.log(`🤖 [Main Controller Bot] User ${userId} ran /cancel`);
     await db.updateUserStep(userId, 'idle', null);
     await ctx.reply('❌ Active setup wizard has been cancelled. Back to home status.');
   });
@@ -71,6 +73,7 @@ function setupControllerBot(bot) {
   // /addchannel command
   bot.command('addchannel', async (ctx) => {
     const userId = ctx.from.id;
+    console.log(`🤖 [Main Controller Bot] User ${userId} ran /addchannel`);
     await db.updateUserStep(userId, 'waiting_for_token', null);
 
     await ctx.reply(
@@ -87,6 +90,7 @@ function setupControllerBot(bot) {
   // /mychannels command
   bot.command('mychannels', async (ctx) => {
     const userId = ctx.from.id;
+    console.log(`🤖 [Main Controller Bot] User ${userId} ran /mychannels`);
     const channels = await db.getChannelsByOwner(userId);
 
     if (channels.length === 0) {

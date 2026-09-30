@@ -145,6 +145,7 @@ function setupCustomBot(bot) {
   bot.action(/^(?:preview_post|preview_post:(.+))$/, async (ctx) => {
     await ctx.answerCbQuery();
     const draftId = ctx.match[1] || ctx.from.id;
+    console.log(`🔘 [Custom Bot] User ${ctx.from.id} clicked preview_post for draft ${draftId}`);
     const draft = await db.getDraft(draftId);
     if (!draft) {
       return ctx.reply("❌ No active draft found or already processed.");
@@ -154,9 +155,53 @@ function setupCustomBot(bot) {
     await replyWithPreview(ctx, draft.media_type, draft.file_id, draft.text);
   });
 
+  // Action: Preview for a post already in Queue
+  bot.action(/^preview_queued_post:(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const postId = parseInt(ctx.match[1], 10);
+    console.log(`🔘 [Custom Bot] User ${ctx.from.id} clicked preview_queued_post for post ID ${postId}`);
+
+    const res = await db.pool.query('SELECT * FROM scheduled_posts WHERE id = $1', [postId]);
+    const post = res.rows[0];
+
+    if (!post) {
+      return ctx.reply("❌ Post no longer exists in queue or already sent.");
+    }
+
+    await ctx.reply("👁️ *Preview of queued post:*", { parse_mode: 'Markdown' });
+    await replyWithPreview(ctx, post.media_type, post.file_id, post.text);
+  });
+
+  // Action: Send Now for a post already in Queue
+  bot.action(/^send_queued_post:(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const postId = parseInt(ctx.match[1], 10);
+    console.log(`📤 [Custom Bot] User ${ctx.from.id} requested immediate send for queued post ID ${postId}`);
+
+    const res = await db.pool.query('SELECT * FROM scheduled_posts WHERE id = $1', [postId]);
+    const post = res.rows[0];
+
+    if (!post) {
+      return ctx.reply("❌ Post no longer exists in queue or already sent.");
+    }
+
+    try {
+      await ctx.reply("📤 Sending post immediately...");
+      await sendPostToChannel(ctx.telegram, post.channel_id, post.media_type, post.file_id, post.text);
+      await queueManager.removeScheduledJob(post.id);
+      await db.deleteScheduledPost(post.id);
+      await ctx.reply("🎉 *Done!* Queued post sent immediately.", { parse_mode: 'Markdown' });
+      console.log(`✅ [Custom Bot] Queued post ID ${post.id} sent immediately.`);
+    } catch (err) {
+      console.error(`❌ Error sending queued post ID ${postId} immediately:`, err);
+      await ctx.reply(`❌ *Failed to send post:* ${err.message}`);
+    }
+  });
+
   bot.action(/^(?:send_post|send_post:(.+))$/, async (ctx) => {
     await ctx.answerCbQuery();
     const draftId = ctx.match[1] || ctx.from.id;
+    console.log(`📤 [Custom Bot] User ${ctx.from.id} clicked send_post for draft ${draftId}`);
     const draft = await db.getDraft(draftId);
     if (!draft) {
       return ctx.reply("❌ No active draft found or already processed.");
@@ -368,16 +413,20 @@ function setupCustomBot(bot) {
   bot.action(/^del_q_post:(\d+):(.+)$/, async (ctx) => {
     const postId = parseInt(ctx.match[1], 10);
     const channelId = ctx.match[2];
+    console.log(`🗑️ [Custom Bot] User ${ctx.from.id} requested deletion of queued post ID ${postId}`);
 
     const deleted = await db.deleteScheduledPost(postId);
     if (deleted) {
       await queueManager.removeScheduledJob(postId);
-      await ctx.answerCbQuery("Post deleted from queue.");
+      await ctx.answerCbQuery("✅ Post deleted from queue.").catch(() => {});
+      try {
+        await ctx.editMessageText("🗑️ *Post removed from queue.*", { parse_mode: 'Markdown' });
+      } catch (err) {
+        await ctx.reply("🗑️ *Post removed from queue.*", { parse_mode: 'Markdown' });
+      }
     } else {
-      await ctx.answerCbQuery("Post not found or already sent.");
+      await ctx.answerCbQuery("⚠️ Post not found or already sent.").catch(() => {});
     }
-
-    return showChannelQueue(ctx, channelId, true);
   });
 
   // Handle target channel selection for draft (for multiple channels flow)
@@ -397,34 +446,59 @@ function setupCustomBot(bot) {
       return ctx.reply("❌ No active draft found.");
     }
 
-    // Update draft with selected channel ID
-    await db.saveDraft(userId, token, channelId, draft.text, draft.media_type, draft.file_id);
+    try {
+      const intervalMinutes = channel.queue_interval || 1;
+      const runAt = await calculateNextQueueRunAt(channel.channel_id, intervalMinutes);
 
-    const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback('👁️ Preview', 'preview_post')],
-      [
-        Markup.button.callback('📤 Send Now', 'send_post'),
-        Markup.button.callback('📥 Add to Queue', 'add_to_queue')
-      ],
-      [
-        Markup.button.callback('🕒 Send with Delay', 'choose_delay'),
-        Markup.button.callback('❌ Cancel', 'cancel_post')
-      ]
-    ]);
+      const post = await db.schedulePost(
+        userId,
+        token,
+        channel.channel_id,
+        draft.text,
+        draft.media_type,
+        draft.file_id,
+        runAt,
+        true // is_queue = true
+      );
 
-    await ctx.editMessageText(
-      `✍️ *Draft created for ${channel.title}*\n\n` +
-      `Click *Preview* to see it, *Send Now* to post immediately, *Add to Queue* to queue it, or *Cancel* to discard.`,
-      { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
-    );
+      await queueManager.addScheduledJob(post.id, post.run_at);
+      await db.clearDraft(draft.id);
+
+      console.log(`📌 [Custom Bot] Post ID ${post.id} auto-queued for Channel "${channel.title}" after channel selection. RunAt: ${runAt.toISOString()}`);
+
+      const timeString = runAt.toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+      const dateString = runAt.toLocaleDateString('en-US', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' });
+
+      const keyboard = Markup.inlineKeyboard([
+        [
+          Markup.button.callback('👁️ Preview', `preview_queued_post:${post.id}`),
+          Markup.button.callback('📤 Send Now', `send_queued_post:${post.id}`)
+        ],
+        [
+          Markup.button.callback('❌ Delete from Queue', `del_q_post:${post.id}:${channel.channel_id}`)
+        ]
+      ]);
+
+      await ctx.editMessageText(
+        `📥 *Post auto-queued for ${channel.title}!*\n\n` +
+        `• Queue Interval: *${formatInterval(intervalMinutes)}*\n` +
+        `• Scheduled Send: *${dateString} at ${timeString}*`,
+        { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
+      );
+    } catch (err) {
+      console.error(`❌ Failed to auto-queue post after channel selection:`, err);
+      await ctx.reply(`❌ Failed to add post to queue: ${err.message}`);
+    }
   });
 
-  // Handle incoming message for draft (Accepts text, photo, video, document, animation, audio, voice, forwarded messages)
+  // Handle incoming message for post (Accepts text, photo, video, document, animation, audio, voice, forwarded messages)
   bot.on('message', async (ctx) => {
     const token = ctx.telegram.token;
     const sessionKey = `${ctx.from.id}:${token}`;
     const session = sessions.get(sessionKey);
 
+    const me = await ctx.telegram.getMe().catch(() => ({ username: 'custom_bot' }));
+    const botUsername = me ? me.username : 'custom_bot';
 
     // Extract text/media from incoming message
     let text = null;
@@ -433,7 +507,6 @@ function setupCustomBot(bot) {
 
     if (ctx.message.photo) {
       const photos = ctx.message.photo;
-      // Get highest resolution photo file ID
       fileId = photos[photos.length - 1].file_id;
       text = ctx.message.caption || null;
       mediaType = 'photo';
@@ -461,111 +534,88 @@ function setupCustomBot(bot) {
       text = ctx.message.text;
       mediaType = 'text';
     } else {
+      console.log(`⚠️ [Bot @${botUsername}] Received unsupported message format from user ${ctx.from.id}`);
       return ctx.reply("⚠️ Unsupported message format. Please send a text, photo, video, document, GIF, or audio file.");
     }
 
+    const isForwarded = !!(ctx.message.forward_origin || ctx.message.forward_date || ctx.message.forward_from_chat || ctx.message.forward_from);
+    console.log(`📩 [Bot @${botUsername}] Received ${isForwarded ? 'FORWARDED ' : ''}${mediaType.toUpperCase()} from user ${ctx.from.id} (Caption/Text length: ${text ? text.length : 0})`);
+
     const channels = await db.getChannelsByBot(token);
     if (channels.length === 0) {
+      console.log(`⚠️ [Bot @${botUsername}] User ${ctx.from.id} sent message, but no channels connected to this bot.`);
       return ctx.reply("👋 Welcome! Please connect a channel using the main Controller Bot first.");
     }
 
-    // Detect if the message is forwarded
-    const isForwarded = !!(ctx.message.forward_origin || ctx.message.forward_date || ctx.message.forward_from_chat || ctx.message.forward_from);
-
-    if (isForwarded) {
-      // Auto-queue forwarded posts sequentially using channel queue interval
-      let targetChannel = channels[0];
-      
-      if (channels.length > 1) {
-        const existingDraft = await db.getDraft(ctx.from.id);
-        if (existingDraft && existingDraft.channel_id) {
-          const matchCh = channels.find(c => String(c.channel_id) === String(existingDraft.channel_id));
-          if (matchCh) {
-            targetChannel = matchCh;
-          }
+    let targetChannel = channels[0];
+    if (channels.length > 1) {
+      const existingDraft = await db.getDraft(ctx.from.id);
+      if (existingDraft && existingDraft.channel_id) {
+        const matchCh = channels.find(c => String(c.channel_id) === String(existingDraft.channel_id));
+        if (matchCh) {
+          targetChannel = matchCh;
         }
-      }
-
-      try {
-        const intervalMinutes = targetChannel.queue_interval || 1;
-        const runAt = await calculateNextQueueRunAt(targetChannel.channel_id, intervalMinutes);
-
-        const post = await db.schedulePost(
-          ctx.from.id,
-          token,
-          targetChannel.channel_id,
-          text,
-          mediaType,
-          fileId,
-          runAt,
-          true // is_queue = true
-        );
-
-        // Enqueue into Redis BullMQ Queue
-        await queueManager.addScheduledJob(post.id, post.run_at);
-
-        const timeString = runAt.toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
-        const dateString = runAt.toLocaleDateString('en-US', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' });
-
-        return ctx.reply(
-          `📥 *Forwarded post auto-queued!*\n` +
-          `• Channel: *${targetChannel.title}*\n` +
-          `• Interval: *${formatInterval(intervalMinutes)}*\n` +
-          `• Scheduled send: *${dateString} at ${timeString}*`,
-          { parse_mode: 'Markdown' }
-        );
-      } catch (err) {
-        console.error('Auto-queue error:', err);
-        return ctx.reply(`❌ Failed to auto-queue forwarded post: ${err.message}`);
+      } else if (!session || session.step !== 'waiting_for_text') {
+        // Multiple channels connected and no channel selected yet: save draft and prompt for channel selection
+        await db.saveDraft(ctx.from.id, token, 0, text, mediaType, fileId);
+        const buttons = channels.map(ch => Markup.button.callback(ch.title, `sel_draft_ch:${ch.channel_id}`));
+        const keyboard = Markup.inlineKeyboard(buttons, { columns: 1 });
+        const description = getMediaDescription(mediaType, text, isForwarded);
+        console.log(`📋 [Bot @${botUsername}] Prompting user ${ctx.from.id} to select target channel from ${channels.length} options.`);
+        return ctx.reply(`${description}\n\nPlease choose the target channel for your post:`, { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup });
       }
     }
 
-    let targetChannelId = null;
+    // Auto-queue the post immediately for targetChannel
+    try {
+      const intervalMinutes = targetChannel.queue_interval || 1;
+      const runAt = await calculateNextQueueRunAt(targetChannel.channel_id, intervalMinutes);
 
-    if (session && session.step === 'waiting_for_text') {
-      targetChannelId = session.channelId;
-    } else if (channels.length === 1) {
-      targetChannelId = channels[0].channel_id;
-    }
+      const post = await db.schedulePost(
+        ctx.from.id,
+        token,
+        targetChannel.channel_id,
+        text,
+        mediaType,
+        fileId,
+        runAt,
+        true // is_queue = true
+      );
 
-    if (targetChannelId) {
-      // Save draft and present interactive options directly with unique draft ID
-      const draft = await db.saveDraft(ctx.from.id, token, targetChannelId, text, mediaType, fileId);
+      // Add to Redis Queue
+      await queueManager.addScheduledJob(post.id, post.run_at);
 
-      // Clean up session if it was waiting_for_text
+      console.log(`📌 [Bot @${botUsername}] AUTO-QUEUED Post ID ${post.id} for Channel "${targetChannel.title}" (${targetChannel.channel_id}). RunAt: ${runAt.toISOString()}, Interval: ${intervalMinutes}m`);
+
       if (session && session.step === 'waiting_for_text') {
         sessions.delete(sessionKey);
       }
 
-      const keyboard = getDraftKeyboard(draft.id);
+      const timeString = runAt.toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+      const dateString = runAt.toLocaleDateString('en-US', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' });
 
-      const description = getMediaDescription(mediaType, text, isForwarded);
-      const channel = channels.find(c => String(c.channel_id) === String(targetChannelId));
-      const channelTitle = channel ? channel.title : 'Destination';
+      const keyboard = Markup.inlineKeyboard([
+        [
+          Markup.button.callback('👁️ Preview', `preview_queued_post:${post.id}`),
+          Markup.button.callback('📤 Send Now', `send_queued_post:${post.id}`)
+        ],
+        [
+          Markup.button.callback('❌ Delete from Queue', `del_q_post:${post.id}:${targetChannel.channel_id}`)
+        ]
+      ]);
 
-      return ctx.reply(
-        `${description}\n` +
-        `📣 Destination: *${channelTitle}*\n\n` +
-        `Click *Preview* to see it, *Send Now* to post immediately, *Add to Queue* to queue it, *Send with Delay* to schedule, or *Cancel* to discard.`,
-        { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
-      );
-    }
- else {
-      // Multiple channels: save draft with channel_id = 0 and let user select channel
-      await db.saveDraft(ctx.from.id, token, 0, text, mediaType, fileId);
-
-      const buttons = channels.map(ch => 
-        Markup.button.callback(ch.title, `sel_draft_ch:${ch.channel_id}`)
-      );
-      const keyboard = Markup.inlineKeyboard(buttons, { columns: 1 });
-
-      const description = getMediaDescription(mediaType, text, isForwarded);
+      const label = isForwarded ? 'Forwarded post' : `${mediaType.charAt(0).toUpperCase() + mediaType.slice(1)} post`;
 
       return ctx.reply(
-        `${description}\n\n` +
-        `Please choose the target channel for your post:`,
+        `📥 *${label} auto-queued!*\n` +
+        `• Channel: *${targetChannel.title}*\n` +
+        `• Queue Interval: *${formatInterval(intervalMinutes)}*\n` +
+        `• Scheduled Send: *${dateString} at ${timeString}*`,
         { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
       );
+    } catch (err) {
+      console.error(`❌ [Bot @${botUsername}] Auto-queue failed for user ${ctx.from.id}:`, err);
+      return ctx.reply(`❌ Failed to auto-queue post: ${err.message}`);
     }
   });
 
