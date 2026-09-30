@@ -107,6 +107,15 @@ async function initDb() {
 
     // Run safe migrations in case the database already exists
     await client.query(`
+      ALTER TABLE users ALTER COLUMN telegram_id TYPE BIGINT;
+      ALTER TABLE bots ALTER COLUMN owner_id TYPE BIGINT;
+      ALTER TABLE channels ALTER COLUMN channel_id TYPE BIGINT;
+      ALTER TABLE channels ALTER COLUMN owner_id TYPE BIGINT;
+      ALTER TABLE drafts ALTER COLUMN user_id TYPE BIGINT;
+      ALTER TABLE drafts ALTER COLUMN channel_id TYPE BIGINT;
+      ALTER TABLE scheduled_posts ALTER COLUMN user_id TYPE BIGINT;
+      ALTER TABLE scheduled_posts ALTER COLUMN channel_id TYPE BIGINT;
+
       ALTER TABLE drafts DROP CONSTRAINT IF EXISTS drafts_pkey;
       ALTER TABLE drafts ADD COLUMN IF NOT EXISTS id SERIAL;
       ALTER TABLE drafts ADD COLUMN IF NOT EXISTS media_type VARCHAR(50) DEFAULT 'text';
@@ -237,19 +246,35 @@ async function saveDraft(userId, botToken, channelId, text, mediaType = 'text', 
 }
 
 async function getDraft(draftIdOrUserId) {
-  if (typeof draftIdOrUserId === 'number' || (typeof draftIdOrUserId === 'string' && /^\d+$/.test(draftIdOrUserId))) {
-    const resId = await pool.query('SELECT * FROM drafts WHERE id = $1', [parseInt(draftIdOrUserId, 10)]);
-    if (resId.rows.length > 0) return resId.rows[0];
+  if (draftIdOrUserId === null || draftIdOrUserId === undefined) return null;
+  const numVal = parseInt(draftIdOrUserId, 10);
+  
+  // If value is within 32-bit INTEGER range (max 2147483647), try looking up by draft.id first
+  if (!isNaN(numVal) && numVal > 0 && numVal <= 2147483647) {
+    try {
+      const resId = await pool.query('SELECT * FROM drafts WHERE id = $1', [numVal]);
+      if (resId.rows.length > 0) return resId.rows[0];
+    } catch (e) {}
   }
+
+  // Otherwise, lookup by user_id (64-bit Telegram user ID)
   const resUser = await pool.query('SELECT * FROM drafts WHERE user_id = $1 ORDER BY id DESC LIMIT 1', [draftIdOrUserId]);
   return resUser.rows[0] || null;
 }
 
 async function clearDraft(draftIdOrUserId) {
-  if (typeof draftIdOrUserId === 'number' || (typeof draftIdOrUserId === 'string' && /^\d+$/.test(draftIdOrUserId))) {
-    const resId = await pool.query('DELETE FROM drafts WHERE id = $1 RETURNING *', [parseInt(draftIdOrUserId, 10)]);
-    if (resId.rows.length > 0) return resId.rows[0];
+  if (draftIdOrUserId === null || draftIdOrUserId === undefined) return null;
+  const numVal = parseInt(draftIdOrUserId, 10);
+
+  // If value is within 32-bit INTEGER range (max 2147483647), try deleting by draft.id first
+  if (!isNaN(numVal) && numVal > 0 && numVal <= 2147483647) {
+    try {
+      const resId = await pool.query('DELETE FROM drafts WHERE id = $1 RETURNING *', [numVal]);
+      if (resId.rows.length > 0) return resId.rows[0];
+    } catch (e) {}
   }
+
+  // Otherwise, delete by user_id (64-bit Telegram user ID)
   const resUser = await pool.query('DELETE FROM drafts WHERE user_id = $1 RETURNING *', [draftIdOrUserId]);
   return resUser.rows[0] || null;
 }
